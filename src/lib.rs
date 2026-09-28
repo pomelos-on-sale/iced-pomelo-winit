@@ -110,18 +110,21 @@
 //!   that insisted on one renderer could never accept it. [`Host`] gets the renderer from
 //!   `<P::Renderer as compositor::Default>::Compositor` instead, exactly as upstream's shell does.
 //!
+//! # Fonts
+//!
+//! A program written for iced installs no font — on a desktop the operating system has them — and
+//! this board has none, so this crate carries one: a 16 KiB Latin subset of Roboto
+//! (`fonts/README.md`), installed by both entry points unless an app or a firmware installed a
+//! font of its own first. [`fonts::install`] always wins; the default only fills a gap. A program
+//! can also bring fonts through iced's own channel, `Program::settings().fonts`.
+//!
 //! # What is still missing
 //!
-//! A program that draws **text** needs a font, and this shell does not install one: the fonts in
-//! the program's own settings are loaded, and anything else has to come from the app (each of the
-//! seven in this OS installs the 16 KiB subset in its `boot`). A platform default — baked in, or
-//! installed by whoever registers the board — is the next thing this needs.
-//!
-//! The rest of the gap is in the renderer and the widget set rather than here: `text_input` and
-//! `text_editor` (the renderer's `fill_editor` is a `todo!()`), text drawn inside a `canvas`,
-//! images, and `iced::window` — which a program with more than one window would need, and which
-//! this board has no answer for. Widget operations that arrive as `Action::Widget` are still
-//! dropped; see `hosting.rs`.
+//! The gap is in the renderer and the widget set rather than here: `text_input` and `text_editor`
+//! (the renderer's `fill_editor` is a `todo!()`), text drawn inside a `canvas`, images, and
+//! `iced::window` — which a program with more than one window would need, and which this board has
+//! no answer for. Widget operations that arrive as `Action::Widget` are still dropped; see
+//! `hosting.rs`.
 
 pub use iced_core as core;
 pub use iced_futures as futures;

@@ -144,6 +144,10 @@ where
     /// arrangement: the settings travel with the program, and whoever creates the compositor
     /// installs them.
     pub fn new(program: P, board: Box<dyn Board>) -> Result<Self, Error> {
+        // Text needs a font, and a program that installs none is the normal case for something
+        // written for iced: the default fills that gap unless the program's authors already did.
+        crate::fonts::install_default();
+
         let (width, height) = board.size();
         let board: BoardHandle = Rc::new(RefCell::new(board));
 

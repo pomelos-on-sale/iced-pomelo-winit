@@ -265,6 +265,10 @@ impl<A: App> Application<A> {
     ///
     /// `None` if the buffers cannot be allocated.
     pub fn new(app: A, width: u32, height: u32) -> Option<Self> {
+        // A program that installs no font of its own still has to draw text, and this is where
+        // the host is entered: the default is a no-op if `boot` already installed one.
+        crate::fonts::install_default();
+
         Some(Self {
             app,
             // iced's own default: the family the theme asks for and 16 logical pixels.
