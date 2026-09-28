@@ -41,11 +41,24 @@ apps of this OS are written against, and it is the one that goes away when they 
 * [`iced-pomelo-gfx`](https://github.com/pomelos-on-sale/iced-pomelo-gfx) — the renderer: a frame
   recorded as a flat list of commands, replayed into RGB565, with the compositor that presents it.
 * [`pomelo-gfx`](https://github.com/pomelos-on-sale/pomelo-gfx) — the rasteriser underneath.
-* a patched iced (`vendor/iced` in `pomelo-os`), for a target without 64-bit atomics.
+* a patched iced (`vendor/iced` in `pomelo-os`): the fork adds the `custom` and `pomelo` features
+  on `iced_renderer` that this crate selects, and `AtomicUsize` id counters for a target with no
+  64-bit atomics.
 
 Both siblings are **git** dependencies: a path would only resolve where the directories happen to
 lie next to each other. In `pomelo-os` a `[patch]` points those git sources back at its submodules,
-so a build there uses the checkouts that are open, and this repository stays buildable on its own.
+so a build there uses the checkouts that are open.
+
+That third bullet has a consequence worth stating: **this crate does not build on its own.** A bare
+checkout takes iced from crates.io, and the build stops in feature resolution —
+
+```text
+package `iced_winit` depends on `iced_renderer` with feature `custom` but `iced_renderer`
+does not have that feature
+```
+
+— because those features are the fork's. The graph that works is an *app's*: it patches iced to the
+fork and takes this crate over git. `pomelo-os`'s `vendor/README.md` has the manifest.
 
 ## The font
 
