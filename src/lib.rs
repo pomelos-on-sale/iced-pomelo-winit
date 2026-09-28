@@ -80,12 +80,15 @@
 //!
 //! # What is still missing for the facade to actually build
 //!
-//! `iced_renderer::Renderer` has to *be* this stack's renderer. An app writes
-//! `type Renderer = iced::Renderer`, and the widget tree it hands back must be the one [`run`] can
-//! draw; today `iced_renderer`'s `custom` feature points that name at `iced_tiny_skia::Renderer`
-//! instead. That is one more change to the fork — a `pomelo` feature naming `iced-pomelo-gfx`, the
-//! way `tiny-skia` names `iced_tiny_skia` — and until it lands, patching this crate in gets you
-//! the signature and not yet the build.
+//! The renderer's *name* is settled: `iced_renderer`'s `pomelo` feature points `Renderer` at
+//! `iced-pomelo-gfx`, this crate turns it on, and an app's `type Renderer = iced::Renderer` is
+//! therefore the renderer that draws it. What is left is the *shell*: iced's facade builds a
+//! `Program` and hands it to `iced_winit::run`, and this [`run`] still insists on a program whose
+//! renderer is concretely ours — while the facade's own wrapper (`iced::Application<P>`) is generic
+//! over `P::Renderer` and cannot prove that. Upstream's `run` has no such bound because it never
+//! names a renderer: it reaches one through `<P::Renderer as compositor::Default>::Compositor`.
+//! Moving this loop onto the same contract is what makes a program written for iced compile here
+//! unchanged.
 
 pub use iced_core as core;
 pub use iced_futures as futures;
@@ -101,13 +104,16 @@ pub mod application;
 pub mod damage;
 pub mod executor;
 pub mod fonts;
-pub mod surface;
 
-// The damage between two frames of the recording, in place of the layer diffing `damage.rs` does
-// for `iced_tiny_skia`. Both are the compositor's business, which is why they live here rather
-// than beside the renderer.
+// The recorded path's surface — the panel's frame buffer and the recorded damage — lives in
+// `iced-pomelo-gfx`, beside the commands it replays; with the `renderer` feature this is a
+// re-export of it, and without it the module below is the `tiny-skia` path's own.
 #[cfg(feature = "renderer")]
-pub mod scene;
+pub use iced_pomelo_gfx::Surface;
+#[cfg(not(feature = "renderer"))]
+mod surface;
+#[cfg(not(feature = "renderer"))]
+pub use surface::Surface;
 
 // Running an iced `Program`, which is the entry point an app written for iced already has. Behind
 // the recorded renderer because `Program`'s renderer has to be a *headless* one that can name a
@@ -123,7 +129,6 @@ pub mod board;
 
 pub use application::{App, Application, Renderer};
 pub use executor::Pump;
-pub use surface::Surface;
 
 #[cfg(feature = "renderer")]
 pub use board::{set_board, Board, Host};

@@ -269,12 +269,8 @@ impl<A: App> Application<A> {
         // The tree borrows the app, so it has to be gone before `update` can mutate it.
         self.cache = ui.into_cache();
 
-        #[cfg(feature = "renderer")]
-        let damaged = self
-            .surface
-            .present_recorded(&self.renderer, base.background_color);
-
-        #[cfg(not(feature = "renderer"))]
+        // One call, two implementations: `tiny-skia`'s surface unions the damage into a single
+        // rectangle for its own reasons, and the recorded one replays each rectangle as it is.
         let damaged = self
             .surface
             .present(&mut self.renderer, base.background_color);

@@ -1,17 +1,19 @@
-//! The frame buffers, and the step that turns a frame into panel pixels.
+//! The `tiny-skia` path's frame buffers, and the step that turns a frame into panel pixels.
 //!
 //! `iced_tiny_skia` is a *recorder*: `Renderer::draw` takes the pixel buffer from the caller,
 //! along with the rectangles that changed. Everything on either side of that call is ours.
+//!
+//! This module exists for the path where the rasteriser *is* `tiny-skia`. With the `renderer`
+//! feature the frame is drawn by `pomelo-gfx` instead, and the surface — the panel buffer and the
+//! recorded damage — lives in that crate, next to the commands it replays: see
+//! `iced_pomelo_gfx::Surface`, which this crate re-exports under the same name.
 
 use iced_core::{Color, Rectangle, Size};
 use iced_graphics::Viewport;
-#[cfg(not(feature = "renderer"))]
 use iced_tiny_skia::Renderer;
-#[cfg(not(feature = "renderer"))]
 use pomelo_gfx::rgb888_to_rgb565;
 use pomelo_gfx::Pixmap565;
 
-#[cfg(not(feature = "renderer"))]
 use crate::damage::Scene;
 
 /// Everything a frame passes through.
@@ -28,15 +30,10 @@ use crate::damage::Scene;
 /// by diffing what it drew last time against what it drew this time, rather than by asking
 /// widgets to report their own invalidations.
 pub struct Surface {
-    #[cfg(not(feature = "renderer"))]
     rgba: Vec<u8>,
-    #[cfg(not(feature = "renderer"))]
     mask: tiny_skia::Mask,
     panel: Pixmap565,
-    #[cfg(not(feature = "renderer"))]
     scene: Scene,
-    #[cfg(feature = "renderer")]
-    recorded: crate::scene::Scene,
     background: Color,
     viewport: Viewport,
 }
@@ -48,15 +45,10 @@ impl Surface {
     /// RGBA surface is 900 KiB and must land in PSRAM rather than internal SRAM.
     pub fn new(width: u32, height: u32) -> Option<Self> {
         Some(Self {
-            #[cfg(not(feature = "renderer"))]
             rgba: vec![0; (width as usize) * (height as usize) * 4],
-            #[cfg(not(feature = "renderer"))]
             mask: tiny_skia::Mask::new(width, height)?,
             panel: Pixmap565::new(width, height)?,
-            #[cfg(not(feature = "renderer"))]
             scene: Scene::new(),
-            #[cfg(feature = "renderer")]
-            recorded: crate::scene::Scene::new(),
             // Deliberately not black: `present` treats a background change as "everything may
             // have moved", so this makes the first frame report full damage. iced's own
             // compositor gets the same effect by starting from `Color::TRANSPARENT`.
@@ -76,76 +68,10 @@ impl Surface {
         &self.panel
     }
 
-    /// Presents a frame recorded by this crate's own renderer, and returns the rectangles that
-    /// changed, in physical pixels.
-    ///
-    /// The other side of the switch in this file. Where [`Surface::present`] has to union its
-    /// damage into a single rectangle — `tiny-skia` rasterises a primitive over its full extent and
-    /// rejects pixels at blend time, so every extra rectangle is another full pass — this one
-    /// replays the frame's commands against each damage rectangle as it is, because `pomelo-gfx`
-    /// takes the clip into the scan. What falls outside the damage costs nothing at all.
-    #[cfg(feature = "renderer")]
-    pub fn present_recorded(
-        &mut self,
-        renderer: &iced_pomelo_gfx::Renderer,
-        background: Color,
-    ) -> Vec<Rectangle> {
-        let screen = Rectangle::with_size(self.viewport.logical_size());
-        let changed = self.recorded.advance(renderer.items());
-
-        // A changed background invalidates every pixel. It is also not a command the tree drew —
-        // the background belongs to the window, not to the tree — so it is painted here, under the
-        // frame's own commands, which is what `iced_tiny_skia`'s `draw(…, background)` does in one
-        // call of its own.
-        let repaint = self.background != background;
-        self.background = background;
-
-        let damage = if repaint { vec![screen] } else { changed };
-
-        let damage = iced_graphics::damage::group(damage, screen);
-
-        if damage.is_empty() {
-            return Vec::new();
-        }
-
-        let damage = iced_graphics::damage::group(damage, screen);
-
-        let mut canvas = pomelo_gfx::Canvas::new(self.panel.as_mut());
-
-        for bounds in &damage {
-            let bounds = *bounds * self.viewport.scale_factor();
-            let rect = pomelo_gfx::Rect::from_ltrb(
-                bounds.x,
-                bounds.y,
-                bounds.x + bounds.width,
-                bounds.y + bounds.height,
-            );
-
-            // The background belongs to the window and not to the tree, so clearing the damage
-            // back to it is this path's own job — and it is not an optimisation. A widget that
-            // moved damages where it *was* as well as where it went, and nothing in the recording
-            // draws there any more: without this, the square that left would still be on the
-            // panel. `iced_tiny_skia`'s `draw(…, background)` does the same thing in one call.
-            canvas.save();
-            canvas.clip_rect(rect);
-            canvas.clear(iced_pomelo_gfx::geometry::color_of(background));
-
-            renderer.replay(&mut canvas, rect);
-
-            canvas.restore();
-        }
-
-        damage
-            .iter()
-            .map(|bounds| *bounds * self.viewport.scale_factor())
-            .collect()
-    }
-
     /// Replays the renderer's damage into the panel buffer and returns the rectangles that
     /// changed, in physical pixels.
     ///
     /// An empty result means nothing moved and the panel does not need to be touched at all.
-    #[cfg(not(feature = "renderer"))]
     pub fn present(&mut self, renderer: &mut Renderer, background: Color) -> Vec<Rectangle> {
         let screen = Rectangle::with_size(self.viewport.logical_size());
 
@@ -233,7 +159,6 @@ impl Surface {
     /// No dithering. A smooth 8-bit gradient quantised to 565 will band, and `pomelo-gfx` has a
     /// Bayer matrix for precisely this — but it is private to its rasterizer, and exposing it
     /// is a change in a different repository now. Deliberately deferred rather than forgotten.
-    #[cfg(not(feature = "renderer"))]
     fn convert(&mut self, bounds: Rectangle) {
         let (width, height) = (
             self.viewport.physical_width(),
