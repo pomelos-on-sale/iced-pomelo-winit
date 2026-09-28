@@ -5,9 +5,10 @@
 //! that implements it runs here *and* on a desktop, unchanged: the only difference is who calls
 //! it (the firmware's loop here, `iced::application(..).run()` there).
 //!
-//! [`ProgramApp`] is that adapter. It owns the [`Instance`] (the program together with its
+//! [`ProgramApp`] is the adapter. It owns the [`Instance`] (the program together with its
 //! state), an [`iced_futures::Runtime`] for tasks and subscriptions, and the [`Pump`] those run
-//! on, and it presents all of that to the loop as an ordinary [`crate::App`]:
+//! on, and it hands the loop the four things a frame needs — the view, the theme, an update, and
+//! whatever popped out of the executor:
 //!
 //! * `update` runs the program's `update`, then polls the [`Task`] it returned — immediately
 //!   ready actions are applied in the same frame, exactly as iced's own loop does it — and hands
@@ -62,7 +63,6 @@ use iced_program::{Instance, Program};
 use iced_runtime::{task, Action, Task};
 
 use crate::executor::Pump;
-use crate::{App, Renderer};
 
 /// How many actions may be waiting for the loop to collect them.
 ///
@@ -83,7 +83,10 @@ pub struct ProgramApp<P: Program> {
     immediate: Vec<Action<P::Message>>,
 }
 
-impl<P: Program> ProgramApp<P> {
+impl<P> ProgramApp<P>
+where
+    P: Program,
+{
     /// Boots `program` and takes ownership of it, running the task its `boot` returned.
     pub fn new(program: P) -> Self {
         let pump = Pump::new();
@@ -121,8 +124,7 @@ impl<P: Program> ProgramApp<P> {
         self.instance.title(self.window)
     }
 
-    /// Runs a task: the part that is ready now, and the rest on the executor.
-    ///
+    /// Runs a task: the part that is ready now, and the rest on the executor.    ///
     /// The split is iced's own (`iced_winit::update`): a `Task::done` or a widget operation is
     /// ready the first time it is polled, and routing it through the executor would delay every
     /// one of them to the next frame.
@@ -192,33 +194,44 @@ impl<P: Program> ProgramApp<P> {
     }
 }
 
-impl<P> App for ProgramApp<P>
+/// What the loop asks of it, one frame at a time.
+///
+/// Not an `impl App`: an [`App`](crate::App) here names its renderer concretely, and the whole
+/// point of hosting a `Program` is that the renderer comes from the program — iced's facade hands
+/// its shell a program whose `Renderer` is a type *parameter*, so the shell cannot name it either.
+/// The loop that drives this type is generic over `P: Program` for that reason, and reaches the
+/// renderer through the compositor that `P::Renderer` names.
+impl<P> ProgramApp<P>
 where
-    P: Program<Renderer = Renderer>,
+    P: Program,
 {
-    type Message = P::Message;
-    type Theme = P::Theme;
-
-    fn theme(&self) -> P::Theme {
-        // `None` is the program saying "the platform's choice", and this platform's default is
-        // iced's own for a dark panel.
+    /// The theme in effect for the one window.
+    ///
+    /// `None` is the program saying "the platform's choice", and this platform's default is iced's
+    /// own for a dark panel.
+    pub fn theme(&self) -> P::Theme
+    where
+        P::Theme: Base,
+    {
         self.instance
             .theme(self.window)
             .unwrap_or_else(|| <P::Theme as Base>::default(Mode::Dark))
     }
 
-    fn update(&mut self, message: P::Message) {
+    /// A message for the program, and whatever work it produced.
+    pub fn update(&mut self, message: P::Message) {
         let task = self.runtime.enter(|| self.instance.update(message));
 
         self.run(task);
         self.track();
     }
 
-    fn view(&self) -> Element<'_, P::Message, P::Theme, Renderer> {
+    /// What the program wants drawn for the one window.
+    pub fn view(&self) -> Element<'_, P::Message, P::Theme, P::Renderer> {
         self.instance.view(self.window)
     }
 
-    fn poll(&mut self) -> Vec<P::Message> {
+    pub fn poll(&mut self) -> Vec<P::Message> {
         self.pump.tick();
 
         let mut messages = Vec::new();

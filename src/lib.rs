@@ -127,7 +127,7 @@ pub mod hosting;
 #[cfg(feature = "renderer")]
 pub mod board;
 
-pub use application::{App, Application, Renderer};
+pub use application::{App, Application, Renderer, Tree};
 pub use executor::Pump;
 
 #[cfg(feature = "renderer")]
@@ -145,10 +145,17 @@ pub use iced_core::{Point, Rectangle};
 /// argument, and no place to put the hardware. The board comes from [`set_board`], which the
 /// firmware calls before handing over — the one piece of global state in this stack, and it
 /// exists because iced's signature has no room for it.
+///
+/// Note what is *not* in the bounds: the renderer. A `Program` names its own renderer type, and
+/// iced's facade hands its shell a program whose renderer is a *type parameter* — a wrapper generic
+/// over `P::Renderer` — so a shell that insisted on one particular renderer could not accept it.
+/// This one asks the program's compositor instead
+/// (`<P::Renderer as compositor::Default>::Compositor`), which is where upstream's `run` gets it
+/// too.
 #[cfg(feature = "renderer")]
 pub fn run<P>(program: P) -> Result<(), Error>
 where
-    P: program::Program<Renderer = Renderer> + 'static,
+    P: program::Program + 'static,
 {
     let board = board::take_board().ok_or(Error::WindowCreationFailed(error::NoWindow))?;
 
