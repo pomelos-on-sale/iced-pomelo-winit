@@ -11,7 +11,7 @@ license = "GPL-3.0-only"
 # building without it; `Surface` picks the path at compile time. Running an iced `Program` needs
 # it, because a `Program`'s renderer has to be a headless one that can name a compositor.
 default = []
-renderer = ["dep:iced-pomelo-gfx"]
+renderer = ["dep:iced-pomelo-gfx", "iced_renderer/pomelo"]
 
 # The facade forwards all of these to `iced_winit`, and on a desktop they select winit features
 # (accessibility, system info, X11/Wayland, ...). There is no window here, so none of them can mean
@@ -47,10 +47,11 @@ iced_futures = "0.14"
 # Re-exported under the names the facade imports them by (`iced_winit::core`, `::program`,
 # `::runtime`), which is how `iced::Element` and friends are reached on a desktop.
 #
-# `iced_widget` depends on `iced_renderer` only to forward features, but that crate's defaults have
-# to name a concrete renderer, and a release build cannot use the unit one — it only implements the
-# renderer traits under `debug_assertions`. `custom` is how this host says "we bring the surface and
-# the compositor; use `iced_tiny_skia`'s renderer for the defaults".
+# `custom` is how this host says "we bring the surface and the compositor; use `iced_tiny_skia`'s
+# renderer for the defaults". The `renderer` feature turns on `pomelo` as well, which is the same
+# arrangement with a different name at the end: it makes `iced_renderer::Renderer` -- and therefore
+# `iced::Renderer`, and therefore an app's `type Renderer` -- ours. That is the whole point of the
+# feature pair: without it an app drawn by us would be written against another renderer.
 iced_renderer = { version = "0.14", default-features = false, features = ["custom"] }
 
 # We build the `PixmapMut` the `tiny-skia` path draws into ourselves, so the buffer layout is ours
