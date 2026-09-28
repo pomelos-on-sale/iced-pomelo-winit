@@ -27,28 +27,41 @@
 //! `iced_runtime::UserInterface` — build the widget tree, feed it the events, draw it — plus two
 //! that belong to the platform: where the events come from, and where the pixels go. On this board
 //! those two are a touch controller and a 480×480 panel, so this crate provides them and nothing
-//! else: [`Application::touch_down`] / `touch_move` / `touch_up`, [`Application::frame`], and
-//! [`Application::panel`] for the pixels — or, for an app written as an iced
-//! [`program::Program`](iced_program::Program), [`run`] with a [`Board`].
+//! else: the [`Board`] a firmware registers, the loop that drives it ([`Host`], or [`run`] when the
+//! board is looked up instead of handed over), and [`Tree`] for the part of a frame that is neither
+//! an app's nor a renderer's.
 //!
 //! ```text
 //! iced_widget / iced_runtime      widgets and the runtime
 //!         ↓   the renderer contract — `iced-pomelo-gfx`
-//! iced-pomelo-gfx                 records the frame's commands
-//!         ↓   the recorded commands
-//! iced_winit (this crate)          the buffers, the damage, the replay, the fonts, the loop
+//! iced-pomelo-gfx                 records the frame, replays it into RGB565, presents it
+//!         ↓   RGB565, plus the damaged rectangles
+//! iced_winit (this crate)          the events, the tree, the fonts, and the loop
 //!         ↓   RGB565
 //! the panel
 //! ```
 //!
+//! # The two shapes a program can have here
+//!
+//! * An iced [`program::Program`](iced_program::Program) — what `iced::run` and every desktop app
+//!   already is — through [`Host`] or [`run`]. The loop is generic over it, and the renderer, the
+//!   surface and the presentation come from the compositor the program's renderer reports. This is
+//!   the shape the facade's `iced::application(..).run()` lands in.
+//! * This crate's own [`App`] — no state split, no tasks, no window id — through [`Application`],
+//!   which the seven apps in this OS are written against. It names its renderer concretely, which
+//!   is why it is not the shape `run` takes; the work of moving those apps onto `Program` is what
+//!   would let this one go.
+//!
 //! # The two paths
 //!
-//! How a frame becomes pixels is chosen at compile time, in `Surface`:
+//! How a frame becomes pixels is chosen at compile time:
 //!
 //! * without the `renderer` feature, `iced_tiny_skia`'s engine rasterises into a
-//!   `width * height * 4` buffer and the damaged rectangles are converted into RGB565;
-//! * with it, `iced-pomelo-gfx` records the frame's commands and `Surface::present_recorded`
-//!   replays them straight into the panel's RGB565 buffer, one damaged rectangle at a time.
+//!   `width * height * 4` buffer, the damaged rectangles are converted into RGB565, and this crate's
+//!   `surface` module owns all three buffers;
+//! * with it, `iced-pomelo-gfx` records the frame's commands, replays them into the panel's RGB565
+//!   buffer through [`Surface`], and presents the damaged regions — the `panel` registration in
+//!   [`Host::new`] is where those pixels reach the board.
 //!
 //! `tiny-skia` is the default until the recorded path passes the frame-cost work written up in
 //! `issues-and-todo/260928-01-iced-canvas-animation-cost.md`.
@@ -78,17 +91,37 @@
 //! * `PixmapMut::draw_pixmap` — the blit every glyph and every image goes through, measured at
 //!   **4.44 µs/px, 86% of paint** on this board in the earlier probe.
 //!
-//! # What is still missing for the facade to actually build
+//! # What a program written for iced needs
 //!
-//! The renderer's *name* is settled: `iced_renderer`'s `pomelo` feature points `Renderer` at
-//! `iced-pomelo-gfx`, this crate turns it on, and an app's `type Renderer = iced::Renderer` is
-//! therefore the renderer that draws it. What is left is the *shell*: iced's facade builds a
-//! `Program` and hands it to `iced_winit::run`, and this [`run`] still insists on a program whose
-//! renderer is concretely ours — while the facade's own wrapper (`iced::Application<P>`) is generic
-//! over `P::Renderer` and cannot prove that. Upstream's `run` has no such bound because it never
-//! names a renderer: it reaches one through `<P::Renderer as compositor::Default>::Compositor`.
-//! Moving this loop onto the same contract is what makes a program written for iced compile here
-//! unchanged.
+//! `iced::run(update, view)` — or `iced::application(..).run()` — ends in
+//! `iced_winit::run(program)`, which is this crate's [`run`]. Two things have to be true for that
+//! to build, and both are in this crate's features rather than in the app:
+//!
+//! * `iced_renderer`'s `pomelo` feature, so that `iced::Renderer` — the renderer an app names once,
+//!   in its `Element` — *is* the one that draws it. That is turned on by this crate's `renderer`
+//!   feature, which an app enables by depending on the host:
+//!
+//!   ```toml
+//!   pomelo-iced-host = { package = "iced_winit", path = "...", features = ["renderer"] }
+//!   ```
+//!
+//! * no renderer *bound* in this shell, which is the other half of the same problem: iced's facade
+//!   hands over a wrapper (`iced::Application<P>`) that is generic over `P::Renderer`, so a shell
+//!   that insisted on one renderer could never accept it. [`Host`] gets the renderer from
+//!   `<P::Renderer as compositor::Default>::Compositor` instead, exactly as upstream's shell does.
+//!
+//! # What is still missing
+//!
+//! A program that draws **text** needs a font, and this shell does not install one: the fonts in
+//! the program's own settings are loaded, and anything else has to come from the app (each of the
+//! seven in this OS installs the 16 KiB subset in its `boot`). A platform default — baked in, or
+//! installed by whoever registers the board — is the next thing this needs.
+//!
+//! The rest of the gap is in the renderer and the widget set rather than here: `text_input` and
+//! `text_editor` (the renderer's `fill_editor` is a `todo!()`), text drawn inside a `canvas`,
+//! images, and `iced::window` — which a program with more than one window would need, and which
+//! this board has no answer for. Widget operations that arrive as `Action::Widget` are still
+//! dropped; see `hosting.rs`.
 
 pub use iced_core as core;
 pub use iced_futures as futures;
