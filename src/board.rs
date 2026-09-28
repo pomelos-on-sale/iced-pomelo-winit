@@ -1,6 +1,6 @@
 //! The board the loop runs on, and the loop itself.
 //!
-//! `pomelo-iced-host` is board-agnostic on purpose: it takes a `Point` and returns `Rectangle`s,
+//! This crate is board-agnostic on purpose: it takes a `Point` and returns `Rectangle`s, and
 //! and `board-bridge` is the only place the ESP32-S3 appears. But iced's `run(program)` takes one
 //! argument and no hardware, so the board has to reach the loop some other way — the firmware
 //! registers it with [`set_board`], and [`crate::run`] takes it back. That is the single piece of
@@ -12,9 +12,9 @@
 
 use std::cell::RefCell;
 
+use crate::{Application, ProgramApp, Renderer};
 use iced_core::{Point, Rectangle};
 use iced_program::Program;
-use pomelo_iced_host::{Application, ProgramApp, Renderer};
 
 use crate::Error;
 

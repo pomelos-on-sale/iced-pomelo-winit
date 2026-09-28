@@ -5,7 +5,7 @@
 //! payload has to implement `std::error::Error` rather than be a `String`.
 //!
 //! Two of them cannot happen here and are declared anyway, because the facade's `From`
-//! implementation names them: creating an executor is [`pomelo_iced_host::Pump::new`], which is a
+//! implementation names them: creating an executor is [`crate::Pump::new`], which is a
 //! `Default`, and a graphics context is not a thing this platform has. The third is real, and it is
 //! what `run` returns when the firmware never registered a board.
 

@@ -6,7 +6,7 @@
 //!
 //! What is being asserted here is the *loop*: that a touch reaches the program, that the panel is
 //! only written when something changed, and that an idle screen is where the board is allowed to
-//! sleep. Whether a `Program` runs at all is `pomelo-iced-host`'s test.
+//! sleep. Whether a `Program` runs at all is `program_tests.rs`'s job.
 
 #![cfg(feature = "renderer")]
 
@@ -45,7 +45,7 @@ impl Program for Counting {
     type State = ();
     type Message = Message;
     type Theme = Theme;
-    type Renderer = pomelo_iced_host::Renderer;
+    type Renderer = iced_winit::Renderer;
     type Executor = null::Executor;
 
     fn name() -> &'static str {
