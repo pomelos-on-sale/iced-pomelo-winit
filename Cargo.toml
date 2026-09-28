@@ -1,0 +1,40 @@
+[package]
+name = "iced_winit"
+version = "0.14.0"
+edition = "2021"
+description = "The name iced's facade expects, answered by pomelo-iced-host: run(program) over the panel, without a window"
+license = "GPL-3.0-only"
+
+[features]
+default = []
+
+# The facade forwards all of these to `iced_winit`, and on a desktop they select winit features
+# (accessibility, system info, X11/Wayland, ...). There is no window here, so none of them can mean
+# anything -- but they have to *exist*, because `iced = { features = ["x11"] }` is a resolve error
+# if the feature is missing from the crate it forwards to.
+debug = []
+sysinfo = []
+unconditional-rendering = []
+linux-theme-detection = []
+x11 = []
+wayland = []
+
+# Running an iced `Program` needs a renderer that can be built headless and can name a compositor,
+# which in this stack is the recorded one; see `pomelo-iced-host::program`. Off by default, so
+# patching this crate in changes nothing until the firmware asks for it.
+renderer = ["pomelo-iced-host/renderer"]
+
+[dependencies]
+pomelo-iced-host = { path = "../pomelo-iced-host" }
+
+# Re-exported under the names the facade imports them by (`iced_winit::core`, `::program`,
+# `::runtime`), which is how `iced::Element` and friends are reached.
+iced_core = "0.14"
+iced_graphics = "0.14"
+iced_program = "0.14"
+iced_runtime = "0.14"
+iced_futures = "0.14"
+
+[dev-dependencies]
+# The tests build widget trees, which is what a `Program`'s view returns.
+iced_widget = { version = "0.14", default-features = false }
