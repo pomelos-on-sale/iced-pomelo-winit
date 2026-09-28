@@ -4,6 +4,7 @@ version = "0.14.0"
 edition = "2021"
 description = "The Pomelo OS host for iced, under the name iced's facade asks for: the event loop, the panel's buffers and fonts — the place iced_winit occupies on a desktop"
 license = "GPL-3.0-only"
+repository = "https://github.com/pomelos-on-sale/iced-pomelo-winit"
 
 [features]
 # The recorded renderer: `iced-pomelo-gfx` draws straight into the panel's RGB565 buffer in place
@@ -25,10 +26,15 @@ x11 = []
 wayland = []
 
 [dependencies]
+# Both of these are repositories of their own, so they arrive over git like any other
+# third-party crate: a path dependency only resolves where the directories happen to lie next to
+# each other, which is true inside `pomelo-os` and nowhere else. `pomelo-os` patches both git
+# sources back to its submodules, so a build there uses the checkouts that are open.
+#
 # The panel's RGB565 frame buffer and its pack functions, and -- with `renderer` on -- the renderer
 # itself, over the same rasteriser.
-pomelo-gfx = { path = "../pomelo-gfx" }
-iced-pomelo-gfx = { path = "../iced-pomelo-gfx", optional = true }
+pomelo-gfx = { git = "ssh://git@github.com/pomelos-on-sale/pomelo-gfx.git" }
+iced-pomelo-gfx = { git = "ssh://git@github.com/pomelos-on-sale/iced-pomelo-gfx.git", optional = true }
 
 # iced. We take the individual crates instead of the `iced` facade, which pulls in `iced_winit` —
 # winit does not build for ESP-IDF. This crate answers to that name; see the crate docs.

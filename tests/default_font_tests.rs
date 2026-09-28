@@ -9,9 +9,11 @@
 //! global, so a second test running beside this one would share it, and "nothing was installed
 //! yet" would stop being true.
 //!
-//! `DejaVuSans.ttf` stands in for an app's own font — and it is a whole 756 KiB of it, which is
-//! exactly the reason this crate ships a 16 KiB subset instead. It is only ever linked into this
-//! test binary; nothing in a firmware image grows by it.
+//! `tests/fonts/Another-Font.ttf` stands in for an app's own font: four glyphs of DejaVu Sans
+//! ("Text", the word this test draws), 14 KiB. It is a *cut* rather than the whole 756 KiB face
+//! precisely because the last section of this test asserts that a different font draws different
+//! pixels — and shipping a whole font to prove that would be the opposite of what this crate
+//! does about fonts.
 
 use iced_core::theme::{Base, Mode};
 use iced_core::{Element, Theme};
@@ -39,7 +41,7 @@ impl App for Label {
 }
 
 /// Someone else's font, for the "an explicit install wins" half.
-const ANOTHER_FONT: &[u8] = include_bytes!("../../../assets/fonts/source/DejaVuSans.ttf");
+const ANOTHER_FONT: &[u8] = include_bytes!("fonts/Another-Font.ttf");
 
 const SIZE: u32 = 128;
 
