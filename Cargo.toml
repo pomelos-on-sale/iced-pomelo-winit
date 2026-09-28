@@ -10,7 +10,8 @@ repository = "https://github.com/pomelos-on-sale/iced-pomelo-winit"
 # The recorded renderer: `iced-pomelo-gfx` draws straight into the panel's RGB565 buffer in place
 # of `tiny-skia`. Off by default while it is being written, so the workspace and the firmware keep
 # building without it; `Surface` picks the path at compile time. Running an iced `Program` needs
-# it, because a `Program`'s renderer has to be a headless one that can name a compositor.
+# it, because a `Program`'s renderer has to be a headless one that can name a compositor -- the
+# `run` that a build without it gets is the compatibility stub in `lib.rs`.
 default = []
 renderer = ["dep:iced-pomelo-gfx", "iced_renderer/pomelo"]
 

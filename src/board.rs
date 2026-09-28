@@ -26,6 +26,8 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use iced_core::theme::Base;
+use iced_core::time::Instant;
+use iced_core::window;
 use iced_core::{Point, Rectangle, Size};
 use iced_graphics::compositor::Compositor as _;
 use iced_graphics::{compositor, Shell, Viewport};
@@ -112,6 +114,25 @@ pub(crate) fn take_board() -> Option<Box<dyn Board>> {
 /// come from `<P::Renderer as compositor::Default>::Compositor`, because a program's renderer is a
 /// type parameter and this loop is not allowed to name it — that is what lets iced's facade, whose
 /// own wrapper is equally generic, hand its program to `run`.
+///
+/// # The window events this loop produces
+///
+/// A panel is a window with no window manager, and a program written for iced can subscribe to
+/// window events. Two of them are true here, so this loop sends them (via [`ProgramApp::broadcast`],
+/// which is the same door `iced_winit` uses):
+///
+/// * `window::Event::Resized` — once, on the first frame, with the panel's size. It is not sent
+///   when the program boots because a subscription does not exist yet then, and it is not sent
+///   again because a panel cannot be resized. `window::resize_events()` is what it is for.
+/// * `window::Event::RedrawRequested` — once per iteration of the loop, timestamped with
+///   `Instant::now()` **read by the loop**. This is what `window::frames()` produces, and it is how
+///   an animation is expressed on this hardware: the loop's iteration *is* the frame, and a program
+///   that says it wants one gets it. It is sent whether or not the iteration turns out to draw
+///   anything, because the message is what makes it draw.
+///
+/// The events that are deliberately *not* sent are the ones that would be fiction: `CloseRequested`
+/// and `Destroyed` (the panel does not go away), `Moved` (nothing moves it), `Focused`/`Unfocused`
+/// (there is no focus), `ScaleFactorChanged` (it is always 1.0), and every file-drag-and-drop event.
 pub struct Host<P>
 where
     P: Program,
@@ -132,6 +153,12 @@ where
     flushed: Rc<Cell<bool>>,
     /// Whether a finger was down at the last iteration, so that the edges can be found.
     touching: bool,
+    /// The size the program has not been told about yet.
+    ///
+    /// The panel's size is the one event iced's contract expects at the start of a window's life,
+    /// and it cannot be sent from [`Host::new`] because no subscription exists yet — so it waits
+    /// here for the first frame, which is the first moment a program can hear it.
+    pending_size: Option<Size>,
 }
 
 impl<P> Host<P>
@@ -198,12 +225,25 @@ where
             board,
             flushed,
             touching: false,
+            pending_size: Some(Size::new(width as f32, height as f32)),
         })
     }
 
     /// The program, for a host that wants to read it.
     pub fn app(&self) -> &ProgramApp<P> {
         &self.program
+    }
+
+    /// Hands the program a message from outside the widget tree.
+    ///
+    /// This is how the hardware buttons reach an app: the panel is iced's window, but button 1 and
+    /// button 3 are the board's, and the app's own message type is the only vocabulary it has for
+    /// them. It goes in the same door a message from a widget or a subscription comes out of, so the
+    /// frame that draws its effect happens for the same reason — `dirty` — and the next iteration
+    /// presents the result.
+    pub fn update(&mut self, message: P::Message) {
+        self.program.update(message);
+        self.dirty = true;
     }
 
     /// One iteration: the touch, the frame, and the panel if anything changed.
@@ -251,13 +291,42 @@ where
 
     /// One frame: what the program has to say, the events, the draw, and the panel.
     fn frame(&mut self) {
+        // The window the panel stands in for has just been opened, and it has a size. This is the
+        // first frame that can deliver it: a subscription is only tracked once the program has
+        // run, which `ProgramApp::new` now does. Before the poll below and not after it, so that a
+        // program asking for its size is answered in the same frame it is asked.
+        if let Some(size) = self.pending_size.take() {
+            self.program.broadcast(window::Event::Resized(size));
+        }
+
+        // A frame happened, and this is when it happened: the loop's own iteration. It is sent
+        // before the decision below and whether or not anything turns out to need drawing, for two
+        // reasons that are really one.
+        //
+        // The first is what `frames()` *means* here. On a desktop the loop turns because a window
+        // asked it to, so "a frame happened" is a fact about the loop and not about the app; this
+        // loop turns at the firmware's rate — about 1 kHz — and an app that subscribes to frames is
+        // saying "tell me about every one of them". That message is what makes the next frame draw,
+        // which is the same shape as the desktop's, where a frame is drawn because a widget asked
+        // for one.
+        //
+        // The second is that without it nothing would ever start: an app that has just been opened
+        // — or just been told to run — has subscribed, but a subscription is not itself a reason to
+        // draw. The frame that carries the news is the frame that produces the first tick, and this
+        // is that frame.
+        self.program
+            .broadcast(window::Event::RedrawRequested(Instant::now()));
+
         self.messages.extend(self.program.poll());
 
-        if !self.dirty
-            && !self.redraw_requested
-            && self.tree.is_idle()
-            && self.messages.is_empty()
-            && !self.program.is_working()
+        // `is_working` is deliberately not part of this decision, although it looks like it should
+        // be. It counts the futures on the executor, and a *live subscription* is one of them for
+        // as long as it lives: a program waiting for `resize_events()` would therefore be "working"
+        // every frame of its life and the panel would be asked for a frame a thousand times a
+        // second to draw the same picture. A task's result does not need it either: `poll` above
+        // runs on every frame regardless of this check, and a message it produces is what makes
+        // the frame happen.
+        if !self.dirty && !self.redraw_requested && self.tree.is_idle() && self.messages.is_empty()
         {
             return;
         }

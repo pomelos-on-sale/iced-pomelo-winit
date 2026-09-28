@@ -357,6 +357,11 @@ impl<A: App> Application<A> {
 
         // One call, two implementations: `tiny-skia`'s surface unions the damage into a single
         // rectangle for its own reasons, and the recorded one replays each rectangle as it is.
+        //
+        // `&mut` is for the first of those: `tiny-skia`'s `present` draws into the renderer's
+        // layers. The recorded one only reads them, so clippy calls the `&mut` unnecessary -- it is
+        // not, in the configuration clippy is not looking at.
+        #[allow(clippy::unnecessary_mut_passed)]
         let damaged = self
             .surface
             .present(&mut self.renderer, base.background_color);

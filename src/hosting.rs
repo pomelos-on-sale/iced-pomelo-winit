@@ -14,8 +14,11 @@
 //!   ready actions are applied in the same frame, exactly as iced's own loop does it — and hands
 //!   whatever is still pending to the runtime;
 //! * `subscription` is asked for after every update and handed to the runtime's tracker, which
-//!   spawns and drops the streams as the recipes change;
-//! * `poll` advances the executor, then turns what came back into messages.
+//!   spawns and drops the streams as the recipes change -- and, like iced's own loop, once at boot
+//!   before anything has been updated;
+//! * `poll` advances the executor, then turns what came back into messages;
+//! * `broadcast` feeds the runtime's event stream, which is what the window subscriptions listen
+//!   to. The events are the loop's to send, because they are the loop's to know: see [`crate::Host`].
 //!
 //! # Two deliberate differences from a desktop
 //!
@@ -73,7 +76,7 @@ const ACTIONS: usize = 64;
 /// An iced [`Program`], hosted by this stack's loop.
 pub struct ProgramApp<P: Program> {
     instance: Instance<P>,
-    runtime: Runtime<Pump, mpsc::Sender<Action<P::Message>>, Action<P::Message>>,
+    runtime: ProgramRuntime<P>,
     actions: mpsc::Receiver<Action<P::Message>>,
     pump: Pump,
     /// The one window: the panel.
@@ -82,6 +85,12 @@ pub struct ProgramApp<P: Program> {
     /// asked for them rather than handing them to the executor, and so does this one.
     immediate: Vec<Action<P::Message>>,
 }
+
+/// The runtime a hosted program's tasks are tracked by: this stack's [`Pump`], and a channel of
+/// [`Action`]s back to the loop. Named rather than spelled out in the field, because the spelled-out
+/// version is genuinely hard to read — which is what clippy says.
+type ProgramRuntime<P> =
+    Runtime<Pump, mpsc::Sender<Action<<P as Program>::Message>>, Action<<P as Program>::Message>>;
 
 impl<P> ProgramApp<P>
 where
@@ -105,7 +114,31 @@ where
 
         app.run(task);
 
+        // The subscription the program had at boot, before anything has been updated. iced's own
+        // loop does the same right after boot, and the difference is visible: a program whose only
+        // subscription is `window::resize_events()` -- which is how an app is told how big its
+        // screen is -- would otherwise be silent until its first message, which is the very
+        // message it is waiting for.
+        app.track();
+
         app
+    }
+
+    /// Hands a window event to whatever is subscribed to the window's events.
+    ///
+    /// This is the half of iced's contract that `iced_winit` supplies on a desktop and that this
+    /// shell has to supply itself, because the panel *is* the window: `window::resize_events()`,
+    /// `window::frames()`, `window::events()` and `keyboard::listen` are all listeners on the
+    /// runtime's event stream, and a shell that never sends an event leaves every one of them
+    /// permanently silent. What iced_winit broadcasts is the list of events a real window
+    /// produces; what this shell can honestly produce is the list in [`crate::Host`]'s
+    /// documentation -- a size, and "a frame happened".
+    pub fn broadcast(&mut self, event: window::Event) {
+        self.runtime.broadcast(subscription::Event::Interaction {
+            window: self.window,
+            event: iced_core::Event::Window(event),
+            status: iced_core::event::Status::Ignored,
+        });
     }
 
     /// The executor the program's tasks run on, for a host that wants to watch it.
@@ -224,6 +257,14 @@ where
 
         self.run(task);
         self.track();
+    }
+
+    /// The state the program is in.
+    ///
+    /// For the loop around it and for its tests: a host that cannot see what it is hosting cannot
+    /// report on it, and this is the same read-only door iced's own `Instance` now has.
+    pub fn state(&self) -> &P::State {
+        self.instance.state()
     }
 
     /// What the program wants drawn for the one window.

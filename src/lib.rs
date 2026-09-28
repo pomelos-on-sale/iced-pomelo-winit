@@ -197,3 +197,31 @@ where
 
     Host::new(program, board)?.run()
 }
+
+/// [`run`], for a build without the recorded renderer.
+///
+/// It exists so that a graph containing `iced`'s facade still *compiles*. The facade's
+/// `Application::run` calls `iced_winit::run` unconditionally -- it is not behind a feature -- and
+/// `iced` asks for this crate with `default-features = false`, so the moment an app is a standard
+/// iced program, some definition of `run` has to resolve no matter which features are on.
+///
+/// Without the recorded renderer there is no compositor to present into, so this always fails. It
+/// is a compatibility stub: the mistake it catches is a *runtime* one (an app that asks to be run
+/// on a build that cannot draw it) rather than a compile error in a third-party crate the app
+/// cannot fix.
+#[cfg(not(feature = "renderer"))]
+pub fn run<P>(_program: P) -> Result<(), Error>
+where
+    P: program::Program + 'static,
+{
+    Err(Error::GraphicsCreationFailed(
+        iced_graphics::Error::GraphicsAdapterNotFound {
+            backend: "pomelo",
+            reason: iced_graphics::error::Reason::RequestFailed(
+                "this build has no renderer for a panel; enable the `renderer` feature of \
+                 `iced_winit` (pomelo-iced-host)"
+                    .to_owned(),
+            ),
+        },
+    ))
+}
