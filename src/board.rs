@@ -1,7 +1,8 @@
 //! The board the loop runs on, and the loop itself.
 //!
 //! This crate is board-agnostic on purpose: it takes a `Point` and returns `Rectangle`s, and
-//! `board-bridge` is the only place the ESP32-S3 appears. But iced's `run(program)` takes one
+//! the firmware's board (`pomelo-hal-esp32`) is the only place the ESP32-S3 appears. But iced's
+//! `run(program)` takes one
 //! argument and no hardware, so the board has to reach the loop some other way — the firmware
 //! registers it with [`set_board`], and [`crate::run`] takes it back. That is the single piece of
 //! global state in this stack, and it is the price of the entry point iced offers.
