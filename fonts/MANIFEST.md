@@ -5,15 +5,15 @@ rebake with `python3 tools/bake_glyphs.py` after changing the charset or the siz
 
 ## What was baked
 
-* source font: `vendor/iced-pomelo-winit/fonts/SourceHanSansSC-Regular-Subset.otf` — 1783388 B, sha256 `fbb1de15a11c185d2c74babfddca9b767157b9243bbdcd8662be43b6738355c5`
-* charset: `assets/fonts/source/charset-common.txt` — 4008 characters
+* source font: `vendor/iced-pomelo-winit/fonts/SourceHanSansSC-Regular-Subset.otf` — 1783424 B, sha256 `172bc95afa6d0708de829299a52428c4e1f8aa0f0dddbb7fdbc7e7fb12c19672`
+* charset: `assets/fonts/source/charset-common.txt` — 4010 characters
 * coverage: 8-bit alpha, no hinting, pixel-aligned (subpixel bins unused)
 
 | table | size | glyphs | coverage | file | bytes/glyph |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `SourceHanSansSC-Regular-Subset-common@14px.bin` | 14 px | 4008 | 720.5 KiB | 767.5 KiB | 184 B |
-| `SourceHanSansSC-Regular-Subset-common@15px.bin` | 15 px | 4008 | 824.0 KiB | 871.0 KiB | 211 B |
-| `SourceHanSansSC-Regular-Subset-common@18px.bin` | 18 px | 4008 | 1175.4 KiB | 1222.4 KiB | 300 B |
+| `SourceHanSansSC-Regular-Subset-common@14px.bin` | 14 px | 4010 | 720.5 KiB | 767.6 KiB | 184 B |
+| `SourceHanSansSC-Regular-Subset-common@15px.bin` | 15 px | 4010 | 824.0 KiB | 871.1 KiB | 210 B |
+| `SourceHanSansSC-Regular-Subset-common@18px.bin` | 18 px | 4010 | 1175.4 KiB | 1222.4 KiB | 300 B |
 
 ## Which sizes are cached, and what happens without one
 
