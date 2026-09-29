@@ -14,6 +14,10 @@ repository = "https://github.com/pomelos-on-sale/iced-pomelo-winit"
 # `run` that a build without it gets is the compatibility stub in `lib.rs`.
 default = []
 renderer = ["dep:iced-pomelo-gfx", "iced_renderer/pomelo"]
+# One timing line per painted frame, split by phase: the recorded renderer's `profile` module is
+# the counters, so this implies `renderer`. A split of a frame that something else drew would not
+# be a split of anything.
+profile = ["renderer", "iced-pomelo-gfx/profile"]
 
 # The facade forwards all of these to `iced_winit`, and on a desktop they select winit features
 # (accessibility, system info, X11/Wayland, ...). There is no window here, so none of them can mean

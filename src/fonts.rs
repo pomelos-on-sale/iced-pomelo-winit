@@ -21,10 +21,10 @@
 //! # The default font
 //!
 //! An app written for iced knows nothing about this board's fonts, and would draw no text at all
-//! if it had to install one. So this crate carries its own: [`install_default`] puts a 16 KiB
-//! Latin subset of Roboto (see `fonts/README.md`) in the database unless something else already
-//! did, and the host calls it on the way in — [`Application::new`](crate::Application::new) and
-//! [`Host::new`](crate::Host::new).
+//! if it had to install one. So this crate carries its own: [`install_default`] puts a 1.8 MB
+//! Simplified-Chinese subset of Source Han Sans (see `fonts/README.md`) in the database unless
+//! something else already did, and the host calls it on the way in —
+//! [`Application::new`](crate::Application::new) and [`Host::new`](crate::Host::new).
 //!
 //! Two rules, and the order between them is the whole design:
 //!
@@ -45,7 +45,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use iced_graphics::text::cosmic_text::fontdb::Family;
 
 /// What this crate embeds, so that a program which installs nothing still draws text.
-const DEFAULT: &[u8] = include_bytes!("../fonts/Roboto-Subset.ttf");
+///
+/// One font, not two: CJK and Latin live in the same face, because mixing a Latin font with a
+/// Chinese one means deciding twice per label which one draws it — and `Font::default()` can only
+/// name one family. The subset is Source Han Sans SC cut to `charset-common.txt` (3755 GB2312
+/// level-1 characters plus ASCII, CJK punctuation and the fullwidth forms) and the cuts are in
+/// `pomelo-os` under `assets/fonts/source/`; `fonts/README.md` has the exact command.
+const DEFAULT: &[u8] = include_bytes!("../fonts/SourceHanSansSC-Regular-Subset.otf");
+
+/// The glyphs of [`DEFAULT`] that were rasterised on the build machine, one table per size.
+///
+/// Flash, not RAM: the renderer reads them in place, and a screen drawn at a baked size never
+/// rasterises anything. Which sizes those are, and the format, is in `fonts/README.md` — a size
+/// that is not here is rasterised on the device as it always was, so this list is a speed
+/// setting and not a correctness one.
+#[cfg(feature = "renderer")]
+const BAKED: &[&[u8]] = &[
+    include_bytes!("../fonts/SourceHanSansSC-Regular-Subset-common@14px.bin"),
+    include_bytes!("../fonts/SourceHanSansSC-Regular-Subset-common@15px.bin"),
+    include_bytes!("../fonts/SourceHanSansSC-Regular-Subset-common@18px.bin"),
+];
 
 /// Whether anyone has installed a font yet — an app, a firmware, or [`install_default`] itself.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -61,20 +80,30 @@ pub fn install(bytes: &'static [u8]) {
 
     system.load_font(Cow::Borrowed(bytes));
 
-    // The face we just added is the last one indexed.
-    let family = system
-        .raw()
-        .db_mut()
-        .faces()
-        .last()
-        .and_then(|face| face.families.first())
-        .map(|(family, _)| family.clone());
+    // The face we just added is the last one indexed. Its id is what the baked tables bind to —
+    // glyph numbers only mean anything against the font they came from.
+    let face = system.raw().db_mut().faces().last().map(|face| {
+        (
+            face.id,
+            face.families.first().map(|(family, _)| family.clone()),
+        )
+    });
 
-    if let Some(family) = family {
-        system.raw().db_mut().set_sans_serif_family(family);
+    if let Some((_, Some(family))) = &face {
+        system.raw().db_mut().set_sans_serif_family(family.clone());
     }
 
     INSTALLED.store(true, Ordering::Relaxed);
+
+    // The tables are installed by whoever installed the font they were baked from: an app that
+    // brings a face of its own gets none of this, and the renderer would refuse them by `font_id`
+    // even if it did.
+    #[cfg(feature = "renderer")]
+    if std::ptr::eq(bytes, DEFAULT) {
+        if let Some((id, _)) = face {
+            iced_pomelo_gfx::baked::install(id, BAKED);
+        }
+    }
 }
 
 /// Installs this crate's own subset, unless an app or a firmware installed a font first.

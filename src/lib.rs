@@ -113,7 +113,7 @@
 //! # Fonts
 //!
 //! A program written for iced installs no font — on a desktop the operating system has them — and
-//! this board has none, so this crate carries one: a 16 KiB Latin subset of Roboto
+//! this board has none, so this crate carries one: a 1.8 MB Simplified-Chinese subset of Source Han Sans
 //! (`fonts/README.md`), installed by both entry points unless an app or a firmware installed a
 //! font of its own first. [`fonts::install`] always wins; the default only fills a gap. A program
 //! can also bring fonts through iced's own channel, `Program::settings().fonts`.

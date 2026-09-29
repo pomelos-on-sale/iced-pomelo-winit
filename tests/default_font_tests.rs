@@ -73,7 +73,7 @@ fn the_default_fills_the_gap_and_an_explicit_font_keeps_it() {
     assert!(fonts::installed(), "Application::new installs a default");
     assert_eq!(
         fonts::sans_serif(),
-        "Roboto",
+        "Source Han Sans SC",
         "the default has to become the sans-serif family, or labels draw as glyphs of nothing"
     );
     assert!(

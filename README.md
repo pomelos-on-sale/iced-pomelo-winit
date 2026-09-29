@@ -63,7 +63,7 @@ fork and takes this crate over git. `pomelo-os`'s `vendor/README.md` has the man
 ## The font
 
 A program written for iced installs no font — on a desktop the operating system has them — so this
-crate carries one: a 16 KiB Latin subset of Roboto in `fonts/`, installed when an app or a firmware
+crate carries one: a 1.8 MB Simplified-Chinese subset of Source Han Sans in `fonts/`, installed when an app or a firmware
 has not installed a font of its own. `fonts::install` always wins; `fonts::install_default` only
 fills a gap. See `fonts/README.md` for what the subset covers, how it was cut, and its licence
 (Apache-2.0, a copy included here).

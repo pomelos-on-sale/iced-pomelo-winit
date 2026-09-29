@@ -205,12 +205,24 @@ impl Tree {
         T: theme::Base,
         M: Send + 'static,
     {
+        // The three phases of the tree are timed through the recorded renderer's counters, which
+        // this crate only depends on with `profile` on: that feature implies `renderer`, because a
+        // split of a frame drawn by something else is not a split of anything.
+        #[cfg(feature = "profile")]
+        let build = iced_pomelo_gfx::profile::start(iced_pomelo_gfx::profile::Phase::TreeBuild);
+
         let mut ui = UserInterface::build(
             view,
             bounds,
             std::mem::replace(&mut self.cache, Cache::new()),
             renderer,
         );
+
+        #[cfg(feature = "profile")]
+        drop(build);
+
+        #[cfg(feature = "profile")]
+        let update = iced_pomelo_gfx::profile::start(iced_pomelo_gfx::profile::Phase::TreeUpdate);
 
         let mut redraw_requested = false;
 
@@ -241,12 +253,21 @@ impl Tree {
             }
         }
 
+        #[cfg(feature = "profile")]
+        drop(update);
+
+        #[cfg(feature = "profile")]
+        let record = iced_pomelo_gfx::profile::start(iced_pomelo_gfx::profile::Phase::TreeRecord);
+
         ui.draw(
             renderer,
             theme,
             &renderer::Style { text_color },
             self.cursor,
         );
+
+        #[cfg(feature = "profile")]
+        drop(record);
 
         self.cache = ui.into_cache();
 
