@@ -16,7 +16,7 @@ use iced_winit::{fonts, App, Application, Renderer};
 use pomelo_gfx::rgb888_to_rgb565;
 
 /// What the firmware embeds: the Source Han Sans SC subset, not iced's 441 KiB Fira Sans.
-const SUBSET: &[u8] = include_bytes!("../fonts/SourceHanSansSC-Regular-Subset.otf");
+const SUBSET: &[u8] = include_bytes!("../../pomelo-font/dist/SourceHanSansSC-Regular-Subset.otf");
 
 const SIZE: u32 = 256;
 const LABEL: &str = "88888";

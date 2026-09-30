@@ -51,19 +51,19 @@ use iced_graphics::text::cosmic_text::fontdb::Family;
 /// name one family. The subset is Source Han Sans SC cut to `charset-common.txt` (3755 GB2312
 /// level-1 characters plus ASCII, CJK punctuation and the fullwidth forms) and the cuts are in
 /// `pomelo-os` under `assets/fonts/source/`; `fonts/README.md` has the exact command.
-const DEFAULT: &[u8] = include_bytes!("../fonts/SourceHanSansSC-Regular-Subset.otf");
+const DEFAULT: &[u8] = include_bytes!("../../pomelo-font/dist/SourceHanSansSC-Regular-Subset.otf");
 
 /// The glyphs of [`DEFAULT`] that were rasterised on the build machine, one table per size.
 ///
 /// Flash, not RAM: the renderer reads them in place, and a screen drawn at a baked size never
-/// rasterises anything. Which sizes those are, and the format, is in `fonts/README.md` — a size
+/// rasterises anything. Which sizes those are, and the format, is in `pomelo-font`'s `dist/MANIFEST.md` — a size
 /// that is not here is rasterised on the device as it always was, so this list is a speed
 /// setting and not a correctness one.
 #[cfg(feature = "renderer")]
 const BAKED: &[&[u8]] = &[
-    include_bytes!("../fonts/SourceHanSansSC-Regular-Subset-common@14px.bin"),
-    include_bytes!("../fonts/SourceHanSansSC-Regular-Subset-common@15px.bin"),
-    include_bytes!("../fonts/SourceHanSansSC-Regular-Subset-common@18px.bin"),
+    include_bytes!("../../pomelo-font/dist/SourceHanSansSC-Regular-Subset-common@14px.bin"),
+    include_bytes!("../../pomelo-font/dist/SourceHanSansSC-Regular-Subset-common@15px.bin"),
+    include_bytes!("../../pomelo-font/dist/SourceHanSansSC-Regular-Subset-common@18px.bin"),
 ];
 
 /// Whether anyone has installed a font yet — an app, a firmware, or [`install_default`] itself.
