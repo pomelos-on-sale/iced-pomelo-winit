@@ -11,7 +11,7 @@
 
 use iced_core::theme::Base as _;
 use iced_core::{
-    clipboard, mouse, renderer, theme, window, Color, Element, Event, Font, Pixels, Point,
+    clipboard, mouse, renderer, theme, touch, window, Color, Element, Event, Font, Pixels, Point,
     Rectangle, Size,
 };
 use iced_runtime::user_interface::{Cache, State, UserInterface};
@@ -143,14 +143,18 @@ impl Tree {
     /// A finger touched the panel at `point`.
     pub fn touch_down(&mut self, point: Point) {
         // A touchscreen has no hover, so the press is three things at once: the pointer appears,
-        // it is here, and the left button goes down. This is the mapping iced_winit uses for
-        // touch, and iced's widgets only listen for the second two.
+        // it is here, and the left button goes down. The mouse events keep button hit-testing
+        // working; the touch event feeds iced's Scrollable touch-drag state machine.
         self.move_cursor(point);
         self.events
             .push(Event::Mouse(mouse::Event::CursorMoved { position: point }));
         self.events.push(Event::Mouse(mouse::Event::ButtonPressed(
             mouse::Button::Left,
         )));
+        self.events.push(Event::Touch(touch::Event::FingerPressed {
+            id: touch::Finger(0),
+            position: point,
+        }));
     }
 
     /// A finger moved while touching the panel.
@@ -167,6 +171,11 @@ impl Tree {
         if moved {
             self.events
                 .push(Event::Mouse(mouse::Event::CursorMoved { position: point }));
+            // Scrollable's touch drag-to-scroll requires Event::Touch, not Event::Mouse.
+            self.events.push(Event::Touch(touch::Event::FingerMoved {
+                id: touch::Finger(0),
+                position: point,
+            }));
         }
     }
 
@@ -176,6 +185,12 @@ impl Tree {
         self.events.push(Event::Mouse(mouse::Event::ButtonReleased(
             mouse::Button::Left,
         )));
+        // Mirror the FingerLifted so Scrollable's TouchScrolling state is reset cleanly.
+        let position = self.cursor.position().unwrap_or(Point::ORIGIN);
+        self.events.push(Event::Touch(touch::Event::FingerLifted {
+            id: touch::Finger(0),
+            position,
+        }));
     }
 
     fn move_cursor(&mut self, point: Point) {
