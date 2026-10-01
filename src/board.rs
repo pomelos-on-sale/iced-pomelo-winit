@@ -50,6 +50,19 @@ pub trait Board {
     /// Hands the damaged rectangles to the panel.
     fn flush(&mut self, damage: &[Rectangle], panel: &[u16]);
 
+    /// Polls for a hardware input event (such as a button press or custom device event).
+    fn poll_event(&mut self) -> Option<iced_core::Event> {
+        None
+    }
+
+    /// Waits for a hardware input event, sleeping up to `timeout_ms`.
+    ///
+    /// If no event occurs before the timeout expires, returns `None`.
+    fn wait_event(&mut self, _timeout_ms: u32) -> Option<iced_core::Event> {
+        self.idle();
+        None
+    }
+
     /// Called when a frame drew nothing, which is where a real board waits.
     ///
     /// Without this the loop would spin at full speed on an idle screen; with it, the panel's
@@ -71,6 +84,14 @@ impl Board for Box<dyn Board> {
 
     fn touch(&self) -> Option<Point> {
         (**self).touch()
+    }
+
+    fn poll_event(&mut self) -> Option<iced_core::Event> {
+        (**self).poll_event()
+    }
+
+    fn wait_event(&mut self, timeout_ms: u32) -> Option<iced_core::Event> {
+        (**self).wait_event(timeout_ms)
     }
 
     fn flush(&mut self, damage: &[Rectangle], panel: &[u16]) {
@@ -250,7 +271,13 @@ where
     ///
     /// Returns whether anything was painted, which is what the firmware's log counts.
     pub fn step(&mut self) -> bool {
-        // The same edge detection the firmware does by hand, so that a touch that is resting is
+        // 1. Process hardware input events (e.g. physical buttons translated to iced_core::Event)
+        if let Some(event) = self.board.borrow_mut().poll_event() {
+            self.program.broadcast_event(event);
+            self.dirty = true;
+        }
+
+        // 2. The same edge detection the firmware does by hand, so that a touch that is resting is
         // not re-delivered: `touch_move` drops sub-pixel movement, but a press that repeated every
         // iteration would be a stream of presses.
         match (self.board.borrow().touch(), self.touching) {
@@ -274,7 +301,10 @@ where
         let painted = self.flushed.get();
 
         if !painted {
-            self.board.borrow_mut().idle();
+            if let Some(event) = self.board.borrow_mut().wait_event(16) {
+                self.program.broadcast_event(event);
+                self.dirty = true;
+            }
         }
 
         painted

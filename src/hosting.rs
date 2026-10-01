@@ -133,12 +133,16 @@ where
     /// permanently silent. What iced_winit broadcasts is the list of events a real window
     /// produces; what this shell can honestly produce is the list in [`crate::Host`]'s
     /// documentation -- a size, and "a frame happened".
-    pub fn broadcast(&mut self, event: window::Event) {
+    pub fn broadcast_event(&mut self, event: iced_core::Event) {
         self.runtime.broadcast(subscription::Event::Interaction {
             window: self.window,
-            event: iced_core::Event::Window(event),
+            event,
             status: iced_core::event::Status::Ignored,
         });
+    }
+
+    pub fn broadcast(&mut self, event: window::Event) {
+        self.broadcast_event(iced_core::Event::Window(event));
     }
 
     /// The executor the program's tasks run on, for a host that wants to watch it.
