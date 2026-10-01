@@ -51,7 +51,7 @@ use iced_graphics::text::cosmic_text::fontdb::Family;
 /// name one family. The subset is Source Han Sans SC cut to `charset-common.txt` (3755 GB2312
 /// level-1 characters plus ASCII, CJK punctuation and the fullwidth forms) and the cuts are in
 /// `pomelo-os` under `assets/fonts/source/`; `fonts/README.md` has the exact command.
-const DEFAULT: &[u8] = include_bytes!("../../pomelo-font/dist/SourceHanSansSC-Regular-Subset.otf");
+const DEFAULT: &[u8] = include_bytes!("../fonts/dist/SourceHanSansSC-Regular-Subset.otf");
 
 /// The glyphs of [`DEFAULT`] that were rasterised on the build machine, one table per size.
 ///
@@ -61,9 +61,9 @@ const DEFAULT: &[u8] = include_bytes!("../../pomelo-font/dist/SourceHanSansSC-Re
 /// setting and not a correctness one.
 #[cfg(feature = "renderer")]
 const BAKED: &[&[u8]] = &[
-    include_bytes!("../../pomelo-font/dist/SourceHanSansSC-Regular-Subset-common@14px.bin"),
-    include_bytes!("../../pomelo-font/dist/SourceHanSansSC-Regular-Subset-common@15px.bin"),
-    include_bytes!("../../pomelo-font/dist/SourceHanSansSC-Regular-Subset-common@18px.bin"),
+    include_bytes!("../fonts/dist/SourceHanSansSC-Regular-Subset-common@14px.bin"),
+    include_bytes!("../fonts/dist/SourceHanSansSC-Regular-Subset-common@15px.bin"),
+    include_bytes!("../fonts/dist/SourceHanSansSC-Regular-Subset-common@18px.bin"),
 ];
 
 /// Whether anyone has installed a font yet — an app, a firmware, or [`install_default`] itself.
