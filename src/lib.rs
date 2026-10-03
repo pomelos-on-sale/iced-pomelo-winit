@@ -137,6 +137,7 @@ pub mod error;
 pub use error::Error;
 
 pub mod application;
+pub mod conversion;
 pub mod damage;
 pub mod executor;
 pub mod fonts;
@@ -161,15 +162,15 @@ pub use surface::Surface;
 pub mod hosting;
 
 #[cfg(feature = "renderer")]
-pub mod board;
+pub mod platform;
 
 pub use application::{App, Application, Renderer, Tree};
 pub use executor::Pump;
 
 #[cfg(feature = "renderer")]
-pub use board::Host;
-#[cfg(feature = "renderer")]
 pub use hosting::ProgramApp;
+#[cfg(feature = "renderer")]
+pub use platform::Host;
 
 // Hosts speak these: a touchscreen hands over a `Point`, and a panel takes a `Rectangle` to flush.
 // Re-exported so that firmware code does not have to depend on `iced_core` to talk to this layer.
@@ -185,7 +186,7 @@ pub fn run<P>(program: P) -> Result<(), Error>
 where
     P: program::Program + 'static,
 {
-    Host::new(program)?.run()
+    platform::Host::new(program)?.run()
 }
 
 /// [`run`], for a build without the recorded renderer.
