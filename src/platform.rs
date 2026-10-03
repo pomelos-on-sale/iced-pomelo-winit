@@ -49,6 +49,7 @@ pub struct HalTouchEvent {
 #[cfg(target_os = "espidf")]
 extern "C" {
     fn hal_display_draw_bitmap(x1: i32, y1: i32, x2: i32, y2: i32, pixels: *const u16, stride: i32);
+    fn hal_display_wait_vsync();
     fn hal_touch_get_point(out_x: *mut i32, out_y: *mut i32) -> bool;
     fn hal_touch_wait_event(out_ev: *mut HalTouchEvent, timeout_ms: u32) -> bool;
     fn vTaskDelay(ticks: u32);
@@ -57,6 +58,9 @@ extern "C" {
 #[cfg(not(target_os = "espidf"))]
 #[allow(unused_variables)]
 unsafe fn hal_display_draw_bitmap(x1: i32, y1: i32, x2: i32, y2: i32, pixels: *const u16, stride: i32) {}
+
+#[cfg(not(target_os = "espidf"))]
+unsafe fn hal_display_wait_vsync() {}
 
 #[cfg(not(target_os = "espidf"))]
 #[allow(unused_variables)]
@@ -153,6 +157,9 @@ where
             let flushed = Rc::clone(&flushed);
             iced_pomelo_gfx::panel::set(move |pixels, damage| {
                 flushed.set(true);
+                unsafe {
+                    hal_display_wait_vsync();
+                }
                 flush_damage(damage, pixels);
             });
         }
