@@ -61,9 +61,9 @@ const DEFAULT: &[u8] = include_bytes!("../fonts/dist/SourceHanSansSC-Regular-Sub
 /// setting and not a correctness one.
 #[cfg(feature = "renderer")]
 const BAKED: &[&[u8]] = &[
-    include_bytes!("../fonts/dist/SourceHanSansSC-Regular-Subset-common@14px.bin"),
-    include_bytes!("../fonts/dist/SourceHanSansSC-Regular-Subset-common@15px.bin"),
     include_bytes!("../fonts/dist/SourceHanSansSC-Regular-Subset-common@18px.bin"),
+    include_bytes!("../fonts/dist/SourceHanSansSC-Regular-Subset-common@20px.bin"),
+    include_bytes!("../fonts/dist/SourceHanSansSC-Regular-Subset-common@24px.bin"),
 ];
 
 /// Whether anyone has installed a font yet — an app, a firmware, or [`install_default`] itself.
