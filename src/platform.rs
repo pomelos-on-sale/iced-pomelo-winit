@@ -104,10 +104,11 @@ pub fn wait_touch_event(timeout_ms: u32) -> Option<iced_core::Event> {
 /// Hands damaged rectangular regions of the frame buffer to the panel via DMA.
 pub fn flush_damage(damage: &[Rectangle], pixels: &[u16]) {
     for bounds in damage {
-        let x1 = bounds.x.floor().max(0.0) as i32;
-        let y1 = bounds.y.floor().max(0.0) as i32;
-        let x2 = (bounds.x + bounds.width).ceil().min(PANEL_WIDTH as f32) as i32;
-        let y2 = (bounds.y + bounds.height).ceil().min(PANEL_HEIGHT as f32) as i32;
+        // Enforce 2-pixel aligned boundaries for hardware CO5300 QSPI DMA controller
+        let x1 = (bounds.x.floor() as i32).max(0) / 2 * 2;
+        let y1 = (bounds.y.floor() as i32).max(0) / 2 * 2;
+        let x2 = (((bounds.x + bounds.width).ceil() as i32 + 1) / 2 * 2).min(PANEL_WIDTH as i32);
+        let y2 = (((bounds.y + bounds.height).ceil() as i32 + 1) / 2 * 2).min(PANEL_HEIGHT as i32);
 
         if x2 > x1 && y2 > y1 {
             unsafe {
