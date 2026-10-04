@@ -103,17 +103,26 @@ pub fn wait_touch_event(timeout_ms: u32) -> Option<iced_core::Event> {
 
 /// Hands damaged rectangular regions of the frame buffer to the panel via DMA.
 pub fn flush_damage(damage: &[Rectangle], pixels: &[u16]) {
-    for bounds in damage {
-        // Enforce 2-pixel aligned boundaries for hardware CO5300 QSPI DMA controller
-        let x1 = (bounds.x.floor() as i32).max(0) / 2 * 2;
-        let y1 = (bounds.y.floor() as i32).max(0) / 2 * 2;
-        let x2 = (((bounds.x + bounds.width).ceil() as i32 + 1) / 2 * 2).min(PANEL_WIDTH as i32);
-        let y2 = (((bounds.y + bounds.height).ceil() as i32 + 1) / 2 * 2).min(PANEL_HEIGHT as i32);
+    if damage.is_empty() {
+        return;
+    }
 
-        if x2 > x1 && y2 > y1 {
-            unsafe {
-                hal_display_draw_bitmap(x1, y1, x2, y2, pixels.as_ptr(), PANEL_WIDTH as i32);
-            }
+    // Merge multiple disjoint rectangles during swiping into a single continuous bounding box
+    // to prevent multi-pass fragmented DMA transfers that cause visual tearing and command stalls.
+    let mut union = damage[0];
+    for bounds in &damage[1..] {
+        union = union.union(bounds);
+    }
+
+    // Enforce 2-pixel aligned boundaries for hardware CO5300 QSPI DMA controller
+    let x1 = (union.x.floor() as i32).max(0) / 2 * 2;
+    let y1 = (union.y.floor() as i32).max(0) / 2 * 2;
+    let x2 = (((union.x + union.width).ceil() as i32 + 1) / 2 * 2).min(PANEL_WIDTH as i32);
+    let y2 = (((union.y + union.height).ceil() as i32 + 1) / 2 * 2).min(PANEL_HEIGHT as i32);
+
+    if x2 > x1 && y2 > y1 {
+        unsafe {
+            hal_display_draw_bitmap(x1, y1, x2, y2, pixels.as_ptr(), PANEL_WIDTH as i32);
         }
     }
 }
