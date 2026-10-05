@@ -159,16 +159,15 @@ impl Tree {
 
     /// A finger moved while touching the panel.
     pub fn touch_move(&mut self, point: Point) {
-        // The controller keeps reporting a resting finger, and every one of those would be a
-        // widget event. Same one-pixel threshold the previous backend used.
+        // Discard identical coordinates from a resting finger, while allowing
+        // continuous 1-pixel incremental movement during slow dragging.
         let moved = self
             .cursor
             .position()
-            .is_none_or(|last| (last.x - point.x).abs() > 1.0 || (last.y - point.y).abs() > 1.0);
-
-        self.move_cursor(point);
+            .is_none_or(|last| (last.x - point.x).abs() >= 1.0 || (last.y - point.y).abs() >= 1.0);
 
         if moved {
+            self.move_cursor(point);
             self.events
                 .push(Event::Mouse(mouse::Event::CursorMoved { position: point }));
             // Scrollable's touch drag-to-scroll requires Event::Touch, not Event::Mouse.
