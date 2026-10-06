@@ -3,7 +3,7 @@
 //! Directly interfaces with the hardware display (DMA flush) and touch interrupt queue,
 //! functioning as the embedded counterpart to `winit::event_loop` and `winit::window`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
@@ -134,6 +134,71 @@ pub fn delay_ticks(ticks: u32) {
     }
 }
 
+/// The panel and the finger: the hardware the loop reads and writes.
+///
+/// This is the embedded counterpart of a window. `winit` *creates* its window, so `iced_winit`
+/// never has to be told what to draw on; here the hardware exists before the software, so it is
+/// handed over instead — [`Host::new`] takes one, and a test substitutes its own. It is the one
+/// seam the two platforms cannot share, and keeping it explicit is what makes the loop testable
+/// without a panel.
+pub trait Board {
+    /// The panel size, in physical pixels.
+    fn size(&self) -> (u32, u32);
+
+    /// Where the finger is now, if it is down. Polled once a step.
+    fn touch(&self) -> Option<Point> {
+        None
+    }
+
+    /// Waits for an input event, up to `timeout_ms`. `None` on timeout.
+    ///
+    /// The default times out at once, which is what a test wants: the loop then runs as fast as
+    /// the caller steps it.
+    fn wait_touch(&self, _timeout_ms: u32) -> Option<iced_core::Event> {
+        None
+    }
+
+    /// Hands the damaged rectangles to the panel, with the frame in its pixels.
+    fn flush(&mut self, damage: &[Rectangle], pixels: &[u16]);
+
+    /// Nothing was drawn: the panel's chance to yield or sleep.
+    ///
+    /// The default does nothing. This is where the firmware's loop lets FreeRTOS run, and it is
+    /// what an idle screen costs.
+    fn idle(&mut self) {}
+}
+
+/// The real panel: the CO5300 over the C side's `hal_display_*`, and the touch controller behind
+/// `hal_touch_*`. This is the [`Board`] the firmware gets, through [`crate::run`].
+pub struct Panel;
+
+impl Board for Panel {
+    fn size(&self) -> (u32, u32) {
+        (PANEL_WIDTH, PANEL_HEIGHT)
+    }
+
+    fn touch(&self) -> Option<Point> {
+        touch_point()
+    }
+
+    fn wait_touch(&self, timeout_ms: u32) -> Option<iced_core::Event> {
+        wait_touch_event(timeout_ms)
+    }
+
+    fn flush(&mut self, damage: &[Rectangle], pixels: &[u16]) {
+        unsafe {
+            hal_display_wait_vsync();
+        }
+
+        flush_damage(damage, pixels);
+    }
+
+    fn idle(&mut self) {
+        // One frame's worth of ticks, so a loop with nothing to do does not spin.
+        delay_ticks(1);
+    }
+}
+
 /// The application host and event loop: drives touch input, frame scheduling, and presentation.
 pub struct Host<P>
 where
@@ -149,6 +214,9 @@ where
     surface: <<P::Renderer as compositor::Default>::Compositor as compositor::Compositor>::Surface,
     viewport: Viewport,
     flushed: Rc<Cell<bool>>,
+    /// The hardware. Shared with the compositor's present callback, which is installed as a
+    /// global and outlives any borrow of `self`.
+    board: Rc<RefCell<Box<dyn Board>>>,
     touching: bool,
     pending_size: Option<Size>,
 }
@@ -157,20 +225,23 @@ impl<P> Host<P>
 where
     P: Program + 'static,
 {
-    pub fn new(program: P) -> Result<Self, Error> {
+    /// Takes `program` and the hardware it draws on and reads.
+    ///
+    /// The board is what `winit` would have created: [`crate::run`] hands over the panel's, and a
+    /// test hands over its own.
+    pub fn new(program: P, board: Box<dyn Board>) -> Result<Self, Error> {
         crate::fonts::install_default();
 
-        let (width, height) = (PANEL_WIDTH, PANEL_HEIGHT);
+        let (width, height) = board.size();
+        let board = Rc::new(RefCell::new(board));
 
         let flushed = Rc::new(Cell::new(false));
         {
             let flushed = Rc::clone(&flushed);
+            let board = Rc::clone(&board);
             iced_pomelo_gfx::panel::set(move |pixels, damage| {
                 flushed.set(true);
-                unsafe {
-                    hal_display_wait_vsync();
-                }
-                flush_damage(damage, pixels);
+                board.borrow_mut().flush(damage, pixels);
             });
         }
 
@@ -205,6 +276,7 @@ where
             surface,
             viewport: Viewport::with_physical_size(Size::new(width, height), 1.0),
             flushed,
+            board,
             touching: false,
             pending_size: Some(Size::new(width as f32, height as f32)),
         })
@@ -214,13 +286,40 @@ where
         &self.program
     }
 
+    /// Queues an event, the way a window would deliver one. For tests, and for a backend whose
+    /// inputs outnumber a touchscreen's.
+    pub fn push_event(&mut self, event: iced_core::Event) {
+        self.tree.push_event(event);
+        self.dirty = true;
+    }
+
+    /// A finger touched the panel at `point`.
+    pub fn touch_down(&mut self, point: Point) {
+        self.tree.touch_down(point);
+        self.dirty = true;
+    }
+
+    /// A finger moved while touching the panel.
+    pub fn touch_move(&mut self, point: Point) {
+        self.tree.touch_move(point);
+        self.dirty = true;
+    }
+
+    /// The finger left the panel.
+    pub fn touch_up(&mut self) {
+        self.tree.touch_up();
+        self.dirty = true;
+    }
+
     pub fn update(&mut self, message: P::Message) {
         self.program.update(message);
         self.dirty = true;
     }
 
     pub fn step(&mut self) -> bool {
-        match (touch_point(), self.touching) {
+        let point = self.board.borrow().touch();
+
+        match (point, self.touching) {
             (Some(point), false) => {
                 self.touching = true;
                 self.tree.touch_down(point);
@@ -238,9 +337,15 @@ where
         let painted = self.flushed.get();
 
         if !painted {
-            if let Some(event) = wait_touch_event(16) {
+            let event = self.board.borrow().wait_touch(16);
+
+            if let Some(event) = event {
                 self.program.broadcast_event(event);
                 self.dirty = true;
+            } else {
+                // Nothing to draw and no input: the board's chance to sleep. This is what an
+                // idle screen costs, and the only place the loop yields.
+                self.board.borrow_mut().idle();
             }
         }
 
@@ -263,7 +368,18 @@ where
 
         self.messages.extend(self.program.poll());
 
-        if !self.dirty && !self.redraw_requested && self.tree.is_idle() && self.messages.is_empty()
+        // What a task asked the tree to do. A widget operation needs the `UserInterface`, which
+        // `Tree::draw` builds, so it is handed to the tree rather than applied here; and a frame
+        // with one pending is not one to skip, or the operation would wait for an input that may
+        // never come.
+        let operations = self.program.take_operations();
+        self.tree.queue_operations(operations);
+
+        if !self.dirty
+            && !self.redraw_requested
+            && self.tree.is_idle()
+            && self.messages.is_empty()
+            && !self.tree.has_operations()
         {
             return;
         }

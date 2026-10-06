@@ -35,12 +35,19 @@
 //! window actions (`open`, `close`, `resize`) have nothing to act on. A `Program` that asks for a
 //! second window is asking for something this hardware does not have.
 //!
-//! # Not done yet
+//! # Widget operations
 //!
-//! Widget operations (`Action::Widget`) are dropped instead of applied to the tree. iced uses them
-//! for things like focusing a text input from a task, and applying one means calling
-//! `UserInterface::operate`, which the loop owns and this module cannot reach. Until then,
-//! `Task::widget` and the operations behind `text_input::focus` do nothing on this platform.
+//! An `Action::Widget` is not dropped. It reaches into a `UserInterface` -- it carries widget
+//! state, not messages -- and only the loop builds one, so it is collected here
+//! ([`ProgramApp::take_operations`]) and the loop applies it to the tree it owns. On this stack
+//! that is [`crate::Host`], which queues them on its [`Tree`](crate::Tree) and runs them through
+//! `UserInterface::operate` in the frame it draws -- the same split iced's own loop makes. Without
+//! this the operations behind `scrollable::snap_to`, `text_input::focus` and the rest of
+//! `Task::widget` would do nothing on this platform.
+//!
+//! Everything else is still dropped: `Reload` rebuilds every window and `Exit` ends a process, and
+//! the clipboard, window, system and image actions have nothing to act on here -- one panel, no
+//! window manager, no clipboard, no system theme.
 //!
 //! # Why this is behind the `renderer` feature
 //!
@@ -56,6 +63,7 @@ use std::borrow::Cow;
 use std::task::{Context, Poll};
 
 use iced_core::theme::{Base, Mode};
+use iced_core::widget::Operation;
 use iced_core::window;
 use iced_core::Element;
 use iced_futures::futures::channel::mpsc;
@@ -84,6 +92,9 @@ pub struct ProgramApp<P: Program> {
     /// Actions a task delivered without waiting. iced's own loop applies these in the frame that
     /// asked for them rather than handing them to the executor, and so does this one.
     immediate: Vec<Action<P::Message>>,
+    /// Widget operations a task produced, waiting for the loop to apply them to the tree it owns.
+    /// See the module docs.
+    operations: Vec<Box<dyn Operation>>,
 }
 
 /// The runtime a hosted program's tasks are tracked by: this stack's [`Pump`], and a channel of
@@ -110,6 +121,7 @@ where
             pump,
             window: window::Id::unique(),
             immediate: Vec::new(),
+            operations: Vec::new(),
         };
 
         app.run(task);
@@ -215,19 +227,36 @@ where
                 None
             }
 
-            // Everything else is a desktop platform action: a widget operation reaches into a tree
-            // this module does not own (see the module docs), and the clipboard, window, system
-            // and image actions have nothing to act on here -- one panel, no window manager, no
+            // The one action this module can honour: a widget operation is kept for the loop, which
+            // owns the `UserInterface` it has to be applied to. See `Self::take_operations`.
+            Action::Widget(operation) => {
+                self.operations.push(operation);
+
+                None
+            }
+
+            // Everything else is a desktop platform action: the clipboard, window, system and
+            // image actions have nothing to act on here -- one panel, no window manager, no
             // clipboard, no system theme. `Reload` rebuilds every window, `Exit` ends a process.
             // Ignoring them is a decision rather than an oversight, which is why they are listed.
-            Action::Widget(_)
-            | Action::Clipboard(_)
+            Action::Clipboard(_)
             | Action::Window(_)
             | Action::System(_)
             | Action::Image(_)
             | Action::Reload
             | Action::Exit => None,
         }
+    }
+
+    /// Takes the widget operations a task has produced since the last call.
+    ///
+    /// A widget operation holds widget state, not messages, so the only thing it can be applied
+    /// to is a `UserInterface` -- built per frame by the loop, which this module has no handle on.
+    /// They are collected for that loop instead: [`crate::Host`] queues them on its
+    /// [`Tree`](crate::Tree), and the tree runs them through `UserInterface::operate` in the frame
+    /// it draws. See the module docs.
+    pub fn take_operations(&mut self) -> Vec<Box<dyn Operation>> {
+        std::mem::take(&mut self.operations)
     }
 }
 
@@ -297,5 +326,89 @@ where
         }
 
         messages
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use iced_core::widget::Id;
+    use iced_core::{Length, Settings};
+    use iced_futures::backend::null;
+    use iced_runtime::widget::operation::{snap_to, RelativeOffset};
+    use iced_widget::{container, text};
+
+    /// A program whose whole boot task is a widget operation.
+    ///
+    /// What it draws does not matter: the thing under test is that the operation reaches the loop
+    /// instead of being dropped on the floor. The tree it would be applied to is the loop's.
+    struct Scroller;
+
+    impl Program for Scroller {
+        type State = ();
+        type Message = ();
+        type Theme = iced_core::Theme;
+        type Renderer = crate::Renderer;
+        type Executor = null::Executor;
+
+        fn name() -> &'static str {
+            "scroller"
+        }
+
+        fn settings(&self) -> Settings {
+            Settings::default()
+        }
+
+        fn window(&self) -> Option<window::Settings> {
+            None
+        }
+
+        fn boot(&self) -> (Self::State, Task<Self::Message>) {
+            // `snap_to` is a `Task::widget`: ready the first time it is polled, and an
+            // `Action::Widget` when it is -- exactly the action this module used to drop.
+            ((), snap_to(Id::unique(), RelativeOffset::START))
+        }
+
+        fn update(
+            &self,
+            _state: &mut Self::State,
+            _message: Self::Message,
+        ) -> Task<Self::Message> {
+            Task::none()
+        }
+
+        fn view<'a>(
+            &self,
+            _state: &'a Self::State,
+            _window: window::Id,
+        ) -> Element<'a, Self::Message, Self::Theme, Self::Renderer> {
+            container(text("scroller"))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        }
+
+        fn theme(&self, _state: &Self::State, _window: window::Id) -> Option<Self::Theme> {
+            None
+        }
+    }
+
+    #[test]
+    fn a_widget_operation_from_a_task_is_kept_for_the_loop() {
+        let mut app = ProgramApp::new(Scroller);
+
+        // `new` already ran the boot task, and it parked the operation where `poll` picks it up.
+        let _ = app.poll();
+
+        assert_eq!(
+            app.take_operations().len(),
+            1,
+            "the widget operation was dropped instead of being kept for the loop"
+        );
+        assert!(
+            app.take_operations().is_empty(),
+            "the same operations were handed out twice"
+        );
     }
 }

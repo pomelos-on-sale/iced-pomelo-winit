@@ -164,13 +164,21 @@ pub mod hosting;
 #[cfg(feature = "renderer")]
 pub mod platform;
 
-pub use application::{App, Application, Renderer, Tree};
+pub use application::Renderer;
 pub use executor::Pump;
 
+// The frame machinery, the loop and the hardware are the platform's, not the interface's.
+// `run` is the whole public entry point, the way `iced_winit::run` is; these are reachable for
+// this crate's own tests and for a backend with more inputs than a touchscreen, but they are not
+// the contract a developer writes against. See the crate documentation.
+#[doc(hidden)]
+pub use application::Tree;
 #[cfg(feature = "renderer")]
+#[doc(hidden)]
 pub use hosting::ProgramApp;
 #[cfg(feature = "renderer")]
-pub use platform::Host;
+#[doc(hidden)]
+pub use platform::{Board, Host, Panel};
 
 // Hosts speak these: a touchscreen hands over a `Point`, and a panel takes a `Rectangle` to flush.
 // Re-exported so that firmware code does not have to depend on `iced_core` to talk to this layer.
@@ -186,7 +194,9 @@ pub fn run<P>(program: P) -> Result<(), Error>
 where
     P: program::Program + 'static,
 {
-    platform::Host::new(program)?.run()
+    // The panel is this platform's window: `winit` would create one, and here it is the board the
+    // firmware's C side drives. Handing it over is what makes `Host` testable; see `Board`.
+    platform::Host::new(program, Box::new(platform::Panel))?.run()
 }
 
 /// [`run`], for a build without the recorded renderer.

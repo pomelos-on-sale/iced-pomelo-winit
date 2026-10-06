@@ -1,123 +1,48 @@
-//! The event loop: input → update → view → present.
+//! The part of a frame that is neither the app's nor the renderer's: the widget tree's cache, the
+//! events waiting for it, the pointer, and the two rendering types the loop draws with.
 //!
-//! iced's own loop is `iced_winit::run`, which needs winit and a window. Its shape is three
-//! phases owned by `iced_runtime::UserInterface` — build the widget tree, feed it events, draw
-//! it — plus two that belong to the platform: where the events come from, and where the pixels
-//! go. Those two are the caller's, so what is left here is the loop and the translation.
-//!
-//! Nothing below knows about the panel's FFI. A board backend polls its touch controller, calls
-//! [`Application::touch_down`] / [`touch_move`] / [`touch_up`], calls [`Application::frame`], and
-//! hands the damaged rectangles and [`Application::panel`] to its LCD.
+//! Both entry points share it: [`crate::run`], hosting an iced
+//! [`Program`](crate::program::Program), and this crate's own tests, driving the same tree by
+//! hand. The loop itself is [`crate::Host`], which owns a `Tree` and the hardware
+//! ([`crate::Board`]).
 
-use iced_core::theme::Base as _;
+use iced_core::widget::{operation::Outcome, Operation};
 use iced_core::{
-    clipboard, mouse, renderer, theme, touch, window, Color, Element, Event, Font, Pixels, Point,
-    Rectangle, Size,
+    clipboard, mouse, renderer, theme, touch, window, Color, Element, Event, Point, Size,
 };
 use iced_runtime::user_interface::{Cache, State, UserInterface};
-use pomelo_gfx::Pixmap565;
 use std::time::Instant;
-
-use crate::Surface;
 
 /// The renderer our apps are written against.
 ///
-/// An app names this exactly once, in the `Element` it returns from [`App::view`]. It is
-/// `iced-pomelo-gfx`'s renderer when the recorded path is on, and `iced_tiny_skia`'s otherwise --
-/// the two are interchangeable from the app's side, which is what makes the switch a switch.
+/// A program names this exactly once, in the `Element` its
+/// [`view`](crate::program::Program::view) returns. It is `iced-pomelo-gfx`'s renderer when the
+/// recorded path is on, and `iced_tiny_skia`'s otherwise -- the two are interchangeable from the
+/// app's side, which is what makes the switch a switch.
 #[cfg(feature = "renderer")]
 pub type Renderer = iced_pomelo_gfx::Renderer;
 
 #[cfg(not(feature = "renderer"))]
 pub type Renderer = iced_tiny_skia::Renderer;
 
-/// An app: iced's vocabulary, minus everything that assumes there is a window.
+/// The widget tree's side of a frame.
 ///
-/// This is deliberately not `iced_program::Program`, which is sized for a windowing backend —
-/// it carries window settings, window ids, an async executor and subscriptions we cannot honor.
-/// The traits that matter for drawing are `iced_runtime`'s, and they are satisfied by the
-/// `Element` this returns.
-pub trait App {
-    /// The message type [`App::update`] accepts.
-    type Message: Send + 'static;
-
-    /// The theme, which supplies the default text and background colors.
-    type Theme: theme::Base;
-
-    /// The theme in effect.
-    fn theme(&self) -> Self::Theme;
-
-    /// Reacts to a message.
-    fn update(&mut self, message: Self::Message);
-
-    /// Describes the interface for the current state.
-    fn view(&self) -> Element<'_, Self::Message, Self::Theme, Renderer>;
-
-    /// Messages from work that is not the widget tree, collected once per frame.
-    ///
-    /// This is where a [`Program`](crate::ProgramApp)'s tasks and subscriptions arrive: the
-    /// adapter advances its executor and hands back whatever it produced. It is asked before the
-    /// frame's events and before the decision to skip the frame, because a message that arrives
-    /// while nothing else is happening still has to be applied.
-    ///
-    /// The default is empty, so an app that has no such work pays one call that returns an empty
-    /// `Vec` per frame.
-    fn poll(&mut self) -> Vec<Self::Message> {
-        Vec::new()
-    }
-
-    /// Whether the app is animating, and so wants a frame even when nothing has happened.
-    ///
-    /// The host asks this before deciding to skip a frame. Without it an animation would have to
-    /// make its own frames, and there is nowhere for it to do that: the loop draws when the app is
-    /// dirty or has events, and a clock ticking is neither. The apps these ports replaced had
-    /// exactly this method, and their host loop polled it the same way.
-    fn is_animating(&self) -> bool {
-        false
-    }
-
-    /// Advances time-based state, once per frame, before [`App::view`] is asked for it.
-    ///
-    /// `view` takes `&self` -- iced's interface is a function of the app's state -- so an
-    /// animation has to be advanced somewhere that can mutate, and this is that place. A `Program`
-    /// would drive this from a subscription to a time stream; an [`App`] here is advanced by the
-    /// loop's own clock, which is the same clock every frame is timed from.
-    fn tick(&mut self) {}
-}
-
-/// A running [`App`]: the widget tree's cache, the renderer, the surface, and the pointer.
-pub struct Application<A: App> {
-    app: A,
-    renderer: Renderer,
-    surface: Surface,
-    tree: Tree,
-    messages: Vec<A::Message>,
-    /// Whether a message was delivered since the last frame. A message is applied after the
-    /// tree that produced it is gone, so its effect has to be drawn by the *next* frame; this
-    /// is what makes that frame happen even though it carries no input.
-    dirty: bool,
-    /// Whether the interface itself asked for another frame — an animation in progress, a
-    /// blinking cursor, scroll momentum. Recomputed every frame from what `update` reports.
-    redraw_requested: bool,
-}
-
-/// The widget tree's side of a frame, with the app taken out of it.
+/// The events a platform delivers, the cursor, the clipboard, the tree's cache, and the platform's
+/// half of iced's redraw contract. That last one is the subtle part: iced's widgets decide what
+/// they look like when they see a redraw request (`Button::draw` paints `self.status`, and
+/// `self.status` is written in exactly one place — the `window::Event::RedrawRequested` arm), and
+/// there is no window here to send one.
 ///
-/// Everything here is the same whether this crate is hosting an [`App`] — its own shape — or an
-/// iced [`Program`](crate::ProgramApp): the events a platform delivers, the cursor, the
-/// clipboard, the tree's cache, and the platform's half of iced's redraw contract. That last one
-/// is the subtle part, and the reason this is shared rather than written twice: iced's widgets
-/// decide what they look like when they see a redraw request (`Button::draw` paints
-/// `self.status`, and `self.status` is written in exactly one place — the
-/// `window::Event::RedrawRequested` arm), and there is no window here to send one.
-///
-/// What is *not* in here is everything that differs between the two shapes: who owns the renderer,
-/// what a message means, whether there is an executor behind the app.
+/// What is *not* in here is who owns the renderer or what a message means: that is the loop's, and
+/// the loop is [`crate::Host`].
 pub struct Tree {
     cache: Cache,
     cursor: mouse::Cursor,
     clipboard: clipboard::Null,
     events: Vec<Event>,
+    /// Widget operations waiting for the next [`Tree::draw`] to apply them. They need the
+    /// `UserInterface`, which only exists inside that call -- see [`Tree::queue_operations`].
+    operations: Vec<Box<dyn Operation>>,
 }
 
 impl Tree {
@@ -127,6 +52,7 @@ impl Tree {
             cursor: mouse::Cursor::Unavailable,
             clipboard: clipboard::Null,
             events: Vec::new(),
+            operations: Vec::new(),
         }
     }
 
@@ -138,6 +64,24 @@ impl Tree {
     /// Queues an event. For tests and for backends with more inputs than a touchscreen.
     pub fn push_event(&mut self, event: Event) {
         self.events.push(event);
+    }
+
+    /// Queues widget operations for the next [`Tree::draw`] to apply to the tree.
+    ///
+    /// A widget operation reaches into a `UserInterface` -- it carries widget state, not messages
+    /// -- and the interface is built and dropped every time `draw` runs. So an operation has to
+    /// wait for it, and this is where it waits. [`crate::ProgramApp::take_operations`] is what
+    /// fills it.
+    pub fn queue_operations(&mut self, operations: Vec<Box<dyn Operation>>) {
+        self.operations.extend(operations);
+    }
+
+    /// Whether a widget operation is waiting to be applied.
+    ///
+    /// A frame with one pending is not a frame to skip: the operation is the work, and nothing
+    /// else may ask for the draw that would apply it.
+    pub fn has_operations(&self) -> bool {
+        !self.operations.is_empty()
     }
 
     /// A finger touched the panel at `point`.
@@ -267,6 +211,23 @@ impl Tree {
             }
         }
 
+        // A widget operation holds widget state, not messages, so the only thing it can be
+        // applied to is the `UserInterface` -- built just above and dropped at the end of this
+        // call. That makes this the one place it can run. Applied after the frame's events, so
+        // the frame that asked for it shows its effect.
+        for operation in std::mem::take(&mut self.operations) {
+            let mut pending = Some(operation);
+
+            while let Some(mut current) = pending.take() {
+                ui.operate(renderer, current.as_mut());
+
+                match current.finish() {
+                    Outcome::None | Outcome::Some(()) => {}
+                    Outcome::Chain(next) => pending = Some(next),
+                }
+            }
+        }
+
         #[cfg(feature = "profile")]
         drop(update);
 
@@ -292,149 +253,5 @@ impl Tree {
 impl Default for Tree {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl<A: App> Application<A> {
-    /// Takes ownership of `app` and allocates the buffers for a `width * height` panel.
-    ///
-    /// `None` if the buffers cannot be allocated.
-    pub fn new(app: A, width: u32, height: u32) -> Option<Self> {
-        // A program that installs no font of its own still has to draw text, and this is where
-        // the host is entered: the default is a no-op if `boot` already installed one.
-        crate::fonts::install_default();
-
-        Some(Self {
-            app,
-            // iced's own default: the family the theme asks for and 16 logical pixels.
-            renderer: Renderer::new(Font::default(), Pixels(16.0)),
-            surface: Surface::new(width, height)?,
-            tree: Tree::new(),
-            messages: Vec::new(),
-            dirty: true,
-            redraw_requested: false,
-        })
-    }
-
-    /// The screen, in logical pixels.
-    pub fn bounds(&self) -> Size {
-        self.surface.viewport().logical_size()
-    }
-
-    /// The RGB565 frame buffer, ready to be handed to the panel.
-    pub fn panel(&self) -> &Pixmap565 {
-        self.surface.panel()
-    }
-
-    /// Queues an event. For tests and for backends with more inputs than a touchscreen.
-    pub fn push_event(&mut self, event: Event) {
-        self.tree.push_event(event);
-    }
-
-    /// A finger touched the panel at `point`.
-    pub fn touch_down(&mut self, point: Point) {
-        self.tree.touch_down(point);
-    }
-
-    /// A finger moved while touching the panel.
-    pub fn touch_move(&mut self, point: Point) {
-        self.tree.touch_move(point);
-    }
-
-    /// The finger left the panel. The pointer stays where it was, because the widget that
-    /// handles the release is the one under it.
-    pub fn touch_up(&mut self) {
-        self.tree.touch_up();
-    }
-
-    /// Runs one frame and returns the rectangles that changed, in physical pixels.
-    ///
-    /// An empty result means nothing moved and the panel does not need to be touched at all —
-    /// which is the normal outcome of calling this on an idle screen.
-    pub fn frame(&mut self) -> Vec<Rectangle> {
-        // Work that is not the widget tree comes first: a `Program`'s tasks and subscriptions.
-        // What they bring is a message like any other, and it has to be applied even on a frame
-        // that would otherwise be skipped -- a panel with a task waiting on it is not an idle
-        // panel.
-        self.messages.extend(self.app.poll());
-
-        if !self.dirty
-            && !self.redraw_requested
-            && self.tree.is_idle()
-            && self.messages.is_empty()
-            && !self.app.is_animating()
-        {
-            return Vec::new();
-        }
-
-        if self.app.is_animating() {
-            self.app.tick();
-        }
-
-        let theme = self.app.theme();
-        // `base()` and not `palette()`: the palette is `Option` (a theme may be a custom
-        // catalog with no single palette) and exists for devtools. The base style is the
-        // background and the default text color, which is what an app is framed by.
-        let base = theme.base();
-        let bounds = self.bounds();
-
-        // Everything between "an event arrived" and "the tree is drawn" is the platform's half of
-        // iced's contract, and it is the same for an `App` and for a `Program`: `Tree` is where it
-        // lives, and this call is what both loops make.
-        self.redraw_requested = self.tree.draw(
-            &mut self.renderer,
-            self.app.view(),
-            &mut self.messages,
-            &theme,
-            bounds,
-            base.text_color,
-        );
-
-        // One call, two implementations: `tiny-skia`'s surface unions the damage into a single
-        // rectangle for its own reasons, and the recorded one replays each rectangle as it is.
-        //
-        // `&mut` is for the first of those: `tiny-skia`'s `present` draws into the renderer's
-        // layers. The recorded one only reads them, so clippy calls the `&mut` unnecessary -- it is
-        // not, in the configuration clippy is not looking at.
-        #[allow(clippy::unnecessary_mut_passed)]
-        let damaged = self
-            .surface
-            .present(&mut self.renderer, base.background_color);
-
-        self.dirty = !self.messages.is_empty();
-
-        for message in self.messages.drain(..) {
-            self.app.update(message);
-        }
-
-        // An update can produce work that finishes without waiting -- `Task::done` is the common
-        // one -- and iced's own loop applies that in the frame that asked for it instead of
-        // leaving it for the next one. One more round: whatever comes out of it needs a frame to
-        // be drawn in, which is what `dirty` is for.
-        for message in self.app.poll() {
-            self.dirty = true;
-            self.app.update(message);
-        }
-
-        damaged
-    }
-
-    /// The app, for a host that needs to read it — a status it displays, a test asserting what a
-    /// tap did. Mutating goes through [`Application::update_app`], which schedules the frame that
-    /// the change would otherwise not get.
-    pub fn app(&self) -> &A {
-        &self.app
-    }
-
-    /// Mutates the app from outside the loop — a clock the platform owns, a battery reading —
-    /// and marks the screen for redrawing, because nothing else would know it changed.
-    pub fn update_app(&mut self, update: impl FnOnce(&mut A)) {
-        update(&mut self.app);
-        self.dirty = true;
-    }
-
-    /// The default text color of a theme, for a backend that needs to paint outside the tree.
-    pub fn text_color(&self) -> Color {
-        self.app.theme().base().text_color
     }
 }
