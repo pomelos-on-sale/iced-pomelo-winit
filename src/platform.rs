@@ -344,7 +344,20 @@ where
         let painted = self.flushed.get();
 
         if !painted {
-            let event = self.board.borrow().wait_touch(16);
+            let timeout = match self.tree.next_redraw() {
+                Some(at) => {
+                    let now = Instant::now();
+                    if now >= at {
+                        0
+                    } else {
+                        let ms = (at - now).as_millis();
+                        (ms.min(500) as u32).max(1)
+                    }
+                }
+                None => 16,
+            };
+
+            let event = self.board.borrow().wait_touch(timeout);
 
             if let Some(event) = event {
                 self.program.broadcast_event(event);
@@ -382,8 +395,14 @@ where
         let operations = self.program.take_operations();
         self.tree.queue_operations(operations);
 
+        let scheduled_redraw_due = self
+            .tree
+            .next_redraw()
+            .is_some_and(|at| Instant::now() >= at);
+
         if !self.dirty
             && !self.redraw_requested
+            && !scheduled_redraw_due
             && self.tree.is_idle()
             && self.messages.is_empty()
             && !self.tree.has_operations()

@@ -43,6 +43,7 @@ pub struct Tree {
     /// Widget operations waiting for the next [`Tree::draw`] to apply them. They need the
     /// `UserInterface`, which only exists inside that call -- see [`Tree::queue_operations`].
     operations: Vec<Box<dyn Operation>>,
+    next_redraw: Option<Instant>,
 }
 
 impl Tree {
@@ -53,7 +54,13 @@ impl Tree {
             clipboard: clipboard::Null,
             events: Vec::new(),
             operations: Vec::new(),
+            next_redraw: None,
         }
+    }
+
+    /// Earliest time when a widget requested a scheduled redraw, if any.
+    pub fn next_redraw(&self) -> Option<Instant> {
+        self.next_redraw
     }
 
     /// Whether an event is waiting to be delivered.
@@ -182,6 +189,7 @@ impl Tree {
         #[cfg(feature = "profile")]
         let update = iced_pomelo_gfx::profile::start(iced_pomelo_gfx::profile::Phase::TreeUpdate);
 
+        self.next_redraw = None;
         let mut redraw_requested = false;
 
         for pass in 0..2 {
@@ -199,11 +207,26 @@ impl Tree {
 
             self.events.clear();
 
-            redraw_requested = match state {
-                State::Outdated => true,
-                State::Updated { redraw_request, .. } => {
-                    matches!(redraw_request, window::RedrawRequest::NextFrame)
+            match state {
+                State::Outdated => {
+                    redraw_requested = true;
+                    self.next_redraw = None;
                 }
+                State::Updated { redraw_request, .. } => match redraw_request {
+                    window::RedrawRequest::NextFrame => {
+                        redraw_requested = true;
+                        self.next_redraw = None;
+                    }
+                    window::RedrawRequest::At(at) => {
+                        if Instant::now() >= at {
+                            redraw_requested = true;
+                            self.next_redraw = None;
+                        } else {
+                            self.next_redraw = Some(self.next_redraw.map_or(at, |prev| prev.min(at)));
+                        }
+                    }
+                    window::RedrawRequest::Wait => {}
+                },
             };
 
             if !redraw_requested || pass == 1 {
@@ -215,6 +238,7 @@ impl Tree {
         // applied to is the `UserInterface` -- built just above and dropped at the end of this
         // call. That makes this the one place it can run. Applied after the frame's events, so
         // the frame that asked for it shows its effect.
+        let had_operations = !self.operations.is_empty();
         for operation in std::mem::take(&mut self.operations) {
             let mut pending = Some(operation);
 
@@ -226,6 +250,41 @@ impl Tree {
                     Outcome::Chain(next) => pending = Some(next),
                 }
             }
+        }
+
+        // If widget operations ran (such as focusing a text input), inform the widgets of the
+        // impending redraw so newly focused widgets can register their scheduled redraw requests
+        // (like cursor blinking).
+        if had_operations {
+            let (state, _) = ui.update(
+                &[Event::Window(window::Event::RedrawRequested(Instant::now()))],
+                self.cursor,
+                renderer,
+                &mut self.clipboard,
+                messages,
+            );
+
+            match state {
+                State::Outdated => {
+                    redraw_requested = true;
+                    self.next_redraw = None;
+                }
+                State::Updated { redraw_request, .. } => match redraw_request {
+                    window::RedrawRequest::NextFrame => {
+                        redraw_requested = true;
+                        self.next_redraw = None;
+                    }
+                    window::RedrawRequest::At(at) => {
+                        if Instant::now() >= at {
+                            redraw_requested = true;
+                            self.next_redraw = None;
+                        } else {
+                            self.next_redraw = Some(self.next_redraw.map_or(at, |prev| prev.min(at)));
+                        }
+                    }
+                    window::RedrawRequest::Wait => {}
+                },
+            };
         }
 
         #[cfg(feature = "profile")]
