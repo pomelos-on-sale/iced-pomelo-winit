@@ -3,21 +3,35 @@
 //! Directly interfaces with the hardware display (DMA flush) and touch interrupt queue,
 //! functioning as the embedded counterpart to `winit::event_loop` and `winit::window`.
 
+#[cfg(feature = "renderer")]
 use std::cell::{Cell, RefCell};
+#[cfg(feature = "renderer")]
 use std::future::Future;
+#[cfg(feature = "renderer")]
 use std::rc::Rc;
+#[cfg(feature = "renderer")]
 use std::task::{Context, Poll, Waker};
+#[cfg(feature = "renderer")]
+use std::time::Duration;
 
+#[cfg(feature = "renderer")]
 use iced_core::theme::Base;
+#[cfg(feature = "renderer")]
 use iced_core::time::Instant;
+#[cfg(feature = "renderer")]
 use iced_core::window;
 use iced_core::{Point, Rectangle, Size};
+#[cfg(feature = "renderer")]
 use iced_graphics::compositor::Compositor as _;
+#[cfg(feature = "renderer")]
 use iced_graphics::{compositor, Shell, Viewport};
+#[cfg(feature = "renderer")]
 use iced_program::Program;
 
+#[cfg(feature = "renderer")]
 use crate::application::Tree;
 use crate::conversion;
+#[cfg(feature = "renderer")]
 use crate::{Error, ProgramApp};
 
 /// The panel width in physical pixels.
@@ -52,6 +66,8 @@ extern "C" {
     fn hal_display_wait_vsync();
     fn hal_touch_get_point(out_x: *mut i32, out_y: *mut i32) -> bool;
     fn hal_touch_wait_event(out_ev: *mut HalTouchEvent, timeout_ms: u32) -> bool;
+    fn hal_display_set_power(on: bool);
+    fn hal_display_is_active() -> bool;
     fn vTaskDelay(ticks: u32);
 }
 
@@ -76,6 +92,15 @@ unsafe fn hal_touch_wait_event(out_ev: *mut HalTouchEvent, timeout_ms: u32) -> b
 
 #[cfg(not(target_os = "espidf"))]
 #[allow(unused_variables)]
+unsafe fn hal_display_set_power(on: bool) {}
+
+#[cfg(not(target_os = "espidf"))]
+unsafe fn hal_display_is_active() -> bool {
+    true
+}
+
+#[cfg(not(target_os = "espidf"))]
+#[allow(unused_variables, non_snake_case)]
 unsafe fn vTaskDelay(ticks: u32) {}
 
 /// Reads the current touch point from the atomic driver cache.
@@ -166,6 +191,14 @@ pub trait Board {
     /// The default does nothing. This is where the firmware's loop lets FreeRTOS run, and it is
     /// what an idle screen costs.
     fn idle(&mut self) {}
+
+    /// Turns the display panel power on or off (e.g. AMOLED sleep / wake).
+    fn set_display_power(&mut self, _on: bool) {}
+
+    /// Whether the display panel is currently powered on.
+    fn is_display_on(&self) -> bool {
+        true
+    }
 }
 
 /// The real panel: the CO5300 over the C side's `hal_display_*`, and the touch controller behind
@@ -197,9 +230,33 @@ impl Board for Panel {
         // One frame's worth of ticks, so a loop with nothing to do does not spin.
         delay_ticks(1);
     }
+
+    fn set_display_power(&mut self, on: bool) {
+        unsafe {
+            hal_display_set_power(on);
+        }
+    }
+
+    fn is_display_on(&self) -> bool {
+        unsafe {
+            hal_display_is_active()
+        }
+    }
+}
+
+/// The display and touch interaction power state of the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenState {
+    /// Screen is on and interactive.
+    Awake,
+    /// Screen is powered off (sleeping).
+    Sleeping,
+    /// Screen was just turned on by a touch gesture; initial touch is swallowed until finger lifts.
+    WakingUp,
 }
 
 /// The application host and event loop: drives touch input, frame scheduling, and presentation.
+#[cfg(feature = "renderer")]
 pub struct Host<P>
 where
     P: Program,
@@ -219,8 +276,12 @@ where
     board: Rc<RefCell<Box<dyn Board>>>,
     touching: bool,
     pending_size: Option<Size>,
+    screen_state: ScreenState,
+    last_activity: Instant,
+    sleep_timeout: Duration,
 }
 
+#[cfg(feature = "renderer")]
 impl<P> Host<P>
 where
     P: Program + 'static,
@@ -265,6 +326,7 @@ where
         let renderer = compositor.create_renderer();
         let surface = compositor.create_surface(iced_pomelo_gfx::Panel, width, height);
 
+        let now = Instant::now();
         Ok(Self {
             program: ProgramApp::new(program),
             tree: Tree::new(),
@@ -279,6 +341,9 @@ where
             board,
             touching: false,
             pending_size: Some(Size::new(width as f32, height as f32)),
+            screen_state: ScreenState::Awake,
+            last_activity: now,
+            sleep_timeout: Duration::from_secs(30),
         })
     }
 
@@ -286,57 +351,160 @@ where
         &self.program
     }
 
+    /// Returns the current screen power state.
+    pub fn screen_state(&self) -> ScreenState {
+        self.screen_state
+    }
+
+    /// Sets the inactivity timeout before the screen automatically sleeps.
+    pub fn set_sleep_timeout(&mut self, timeout: Duration) {
+        self.sleep_timeout = timeout;
+    }
+
+    /// Explicitly wake up the display.
+    pub fn wake_up(&mut self) {
+        if self.screen_state != ScreenState::Awake {
+            self.board.borrow_mut().set_display_power(true);
+            self.screen_state = ScreenState::Awake;
+            self.last_activity = Instant::now();
+            self.dirty = true;
+        }
+    }
+
+    /// Explicitly put the screen to sleep.
+    pub fn sleep(&mut self) {
+        if self.screen_state == ScreenState::Awake {
+            if self.touching {
+                self.touching = false;
+                self.tree.touch_up();
+            }
+            self.board.borrow_mut().set_display_power(false);
+            self.screen_state = ScreenState::Sleeping;
+        }
+    }
+
     /// Queues an event, the way a window would deliver one. For tests, and for a backend whose
     /// inputs outnumber a touchscreen's.
     pub fn push_event(&mut self, event: iced_core::Event) {
+        self.last_activity = Instant::now();
         self.tree.push_event(event);
         self.dirty = true;
     }
 
     /// A finger touched the panel at `point`.
     pub fn touch_down(&mut self, point: Point) {
+        self.last_activity = Instant::now();
         self.tree.touch_down(point);
         self.dirty = true;
     }
 
     /// A finger moved while touching the panel.
     pub fn touch_move(&mut self, point: Point) {
+        self.last_activity = Instant::now();
         self.tree.touch_move(point);
         self.dirty = true;
     }
 
     /// The finger left the panel.
     pub fn touch_up(&mut self) {
+        self.last_activity = Instant::now();
         self.tree.touch_up();
         self.dirty = true;
     }
 
     pub fn update(&mut self, message: P::Message) {
+        self.last_activity = Instant::now();
         self.program.update(message);
         self.dirty = true;
     }
 
     pub fn step(&mut self) -> bool {
-        let point = self.board.borrow().touch();
-
-        match (point, self.touching) {
-            (Some(point), false) => {
-                self.touching = true;
-                self.tree.touch_down(point);
-            }
-            (Some(point), true) => self.tree.touch_move(point),
-            (None, true) => {
+        // 1. Sync screen state if hardware display was toggled externally (e.g. by physical button)
+        let display_is_on = self.board.borrow().is_display_on();
+        if !display_is_on && self.screen_state == ScreenState::Awake {
+            if self.touching {
                 self.touching = false;
                 self.tree.touch_up();
             }
-            (None, false) => {}
+            self.screen_state = ScreenState::Sleeping;
+        } else if display_is_on && self.screen_state == ScreenState::Sleeping {
+            self.screen_state = ScreenState::Awake;
+            self.last_activity = Instant::now();
+            self.dirty = true;
         }
 
-        // Drain any pending asynchronous touch events from the hardware queue
-        // so the FreeRTOS event queue never saturates and drops critical UP events.
-        while let Some(event) = self.board.borrow().wait_touch(0) {
-            self.program.broadcast_event(event);
-            self.dirty = true;
+        // 2. Check inactivity timeout when Awake
+        let now = Instant::now();
+        if self.screen_state == ScreenState::Awake && !self.touching {
+            if now.duration_since(self.last_activity) >= self.sleep_timeout {
+                self.screen_state = ScreenState::Sleeping;
+                self.board.borrow_mut().set_display_power(false);
+            }
+        }
+
+        // 3. Handle touch & event stream according to screen state
+        let point = self.board.borrow().touch();
+
+        match self.screen_state {
+            ScreenState::Sleeping => {
+                // Drain and discard any buffered touch interrupt events while asleep
+                while self.board.borrow().wait_touch(0).is_some() {}
+
+                if let Some(_pt) = point {
+                    // First touch on sleeping panel: WAKE UP & SWALLOW
+                    self.board.borrow_mut().set_display_power(true);
+                    self.screen_state = ScreenState::WakingUp;
+                    self.touching = true;
+                    self.last_activity = Instant::now();
+                    self.dirty = true;
+                    // Do NOT pass this initial touch to tree or program!
+                } else {
+                    // Remain asleep: skip frame presentation to save power/CPU
+                    self.board.borrow_mut().idle();
+                    return false;
+                }
+            }
+            ScreenState::WakingUp => {
+                // Drain and discard any buffered touch interrupt events during wake-up gesture
+                while self.board.borrow().wait_touch(0).is_some() {}
+
+                if point.is_some() {
+                    // Finger is still held down from the wake gesture: continue swallowing!
+                    self.last_activity = Instant::now();
+                } else {
+                    // Finger was lifted: wake gesture completed! Now fully awake.
+                    self.screen_state = ScreenState::Awake;
+                    self.touching = false;
+                    self.last_activity = Instant::now();
+                    self.dirty = true;
+                }
+            }
+            ScreenState::Awake => {
+                match (point, self.touching) {
+                    (Some(point), false) => {
+                        self.touching = true;
+                        self.last_activity = Instant::now();
+                        self.tree.touch_down(point);
+                    }
+                    (Some(point), true) => {
+                        self.last_activity = Instant::now();
+                        self.tree.touch_move(point);
+                    }
+                    (None, true) => {
+                        self.touching = false;
+                        self.last_activity = Instant::now();
+                        self.tree.touch_up();
+                    }
+                    (None, false) => {}
+                }
+
+                // Drain any pending asynchronous touch events from the hardware queue
+                while let Some(event) = self.board.borrow().wait_touch(0) {
+                    self.last_activity = Instant::now();
+                    self.program.broadcast_event(event);
+                    self.dirty = true;
+                }
+            }
         }
 
         self.flushed.set(false);
@@ -360,6 +528,7 @@ where
             let event = self.board.borrow().wait_touch(timeout);
 
             if let Some(event) = event {
+                self.last_activity = Instant::now();
                 self.program.broadcast_event(event);
                 self.dirty = true;
             } else {
@@ -414,6 +583,7 @@ where
         let base = theme.base();
         let bounds = self.viewport.logical_size();
 
+        let t0 = Instant::now();
         self.redraw_requested = self.tree.draw(
             &mut self.renderer,
             self.program.view(),
@@ -430,6 +600,10 @@ where
             base.background_color,
             || {},
         );
+        let render_ms = t0.elapsed().as_millis();
+        if render_ms >= 16 {
+            println!("[perf] frame render took {}ms (>16ms target)", render_ms);
+        }
 
         self.dirty = !self.messages.is_empty();
 
@@ -444,6 +618,7 @@ where
     }
 }
 
+#[cfg(feature = "renderer")]
 fn block_on<F: Future>(future: F) -> F::Output {
     let mut future = Box::pin(future);
     let mut context = Context::from_waker(Waker::noop());
@@ -452,5 +627,193 @@ fn block_on<F: Future>(future: F) -> F::Output {
         if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
             return output;
         }
+    }
+}
+
+#[cfg(all(test, feature = "renderer"))]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use iced_core::{Element, Length, Settings};
+    use iced_futures::backend::null;
+    use iced_runtime::Task;
+    use iced_widget::{button, text};
+
+    struct TestBoard {
+        touch_point: Rc<Cell<Option<Point>>>,
+        display_powered: Rc<Cell<bool>>,
+    }
+
+    impl Board for TestBoard {
+        fn size(&self) -> (u32, u32) {
+            (480, 480)
+        }
+
+        fn touch(&self) -> Option<Point> {
+            self.touch_point.get()
+        }
+
+        fn flush(&mut self, _damage: &[Rectangle], _pixels: &[u16]) {}
+
+        fn set_display_power(&mut self, on: bool) {
+            self.display_powered.set(on);
+        }
+
+        fn is_display_on(&self) -> bool {
+            self.display_powered.get()
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum TestMsg {
+        Clicked,
+    }
+
+    struct TestApp {
+        clicked: Arc<AtomicBool>,
+    }
+
+    impl Program for TestApp {
+        type State = ();
+        type Message = TestMsg;
+        type Theme = iced_core::Theme;
+        type Renderer = crate::Renderer;
+        type Executor = null::Executor;
+
+        fn name() -> &'static str {
+            "test_app"
+        }
+
+        fn settings(&self) -> Settings {
+            Settings::default()
+        }
+
+        fn window(&self) -> Option<iced_core::window::Settings> {
+            None
+        }
+
+        fn boot(&self) -> (Self::State, Task<Self::Message>) {
+            ((), Task::none())
+        }
+
+        fn update(&self, _state: &mut Self::State, message: Self::Message) -> Task<Self::Message> {
+            if message == TestMsg::Clicked {
+                self.clicked.store(true, Ordering::SeqCst);
+            }
+            Task::none()
+        }
+
+        fn view<'a>(
+            &self,
+            _state: &'a Self::State,
+            _window: iced_core::window::Id,
+        ) -> Element<'a, Self::Message, Self::Theme, Self::Renderer> {
+            button(text("Click Me"))
+                .on_press(TestMsg::Clicked)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        }
+    }
+
+    #[test]
+    fn host_auto_sleep_and_wake_up_touch_swallow() {
+        let touch_point = Rc::new(Cell::new(None));
+        let display_powered = Rc::new(Cell::new(true));
+        let board = Box::new(TestBoard {
+            touch_point: Rc::clone(&touch_point),
+            display_powered: Rc::clone(&display_powered),
+        });
+
+        let clicked = Arc::new(AtomicBool::new(false));
+        let app = TestApp {
+            clicked: Arc::clone(&clicked),
+        };
+        let mut host = Host::new(app, board).unwrap();
+
+        // 1. Initial state: Awake, display ON
+        assert_eq!(host.screen_state(), ScreenState::Awake);
+        assert!(display_powered.get());
+
+        // Initial frame draw
+        host.step();
+        assert!(!clicked.load(Ordering::SeqCst));
+
+        // 2. Set small timeout for test
+        host.set_sleep_timeout(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(15));
+
+        // Step should transition to Sleeping and power off display
+        host.step();
+        assert_eq!(host.screen_state(), ScreenState::Sleeping);
+        assert!(!display_powered.get(), "display should have been powered off");
+
+        // 3. User touches screen to wake up (finger down at center 240, 240)
+        touch_point.set(Some(Point::new(240.0, 240.0)));
+        host.step();
+
+        // Screen powers back ON and enters WakingUp state
+        assert_eq!(host.screen_state(), ScreenState::WakingUp);
+        assert!(display_powered.get(), "display should have powered back on");
+        // Crucial: wake-up touch must NOT click the button!
+        assert!(!clicked.load(Ordering::SeqCst), "wake-up touch must be swallowed!");
+
+        // Finger moves slightly (still held down)
+        touch_point.set(Some(Point::new(241.0, 241.0)));
+        host.step();
+        assert_eq!(host.screen_state(), ScreenState::WakingUp);
+        assert!(
+            !clicked.load(Ordering::SeqCst),
+            "move during wake gesture must still be swallowed"
+        );
+
+        // Finger is lifted
+        touch_point.set(None);
+        host.step();
+        assert_eq!(host.screen_state(), ScreenState::Awake);
+        assert!(!clicked.load(Ordering::SeqCst), "lift must not click button");
+
+        // 4. Now that screen is awake, the next touch normally clicks the button!
+        touch_point.set(Some(Point::new(240.0, 240.0)));
+        host.step();
+        touch_point.set(None);
+        host.step();
+        assert!(
+            clicked.load(Ordering::SeqCst),
+            "touch while awake should click the button"
+        );
+    }
+
+    #[test]
+    fn host_external_button_wake() {
+        let touch_point = Rc::new(Cell::new(None));
+        let display_powered = Rc::new(Cell::new(true));
+        let board = Box::new(TestBoard {
+            touch_point: Rc::clone(&touch_point),
+            display_powered: Rc::clone(&display_powered),
+        });
+
+        let clicked = Arc::new(AtomicBool::new(false));
+        let app = TestApp {
+            clicked: Arc::clone(&clicked),
+        };
+        let mut host = Host::new(app, board).unwrap();
+
+        // Put screen to sleep
+        host.sleep();
+        assert_eq!(host.screen_state(), ScreenState::Sleeping);
+        assert!(!display_powered.get());
+
+        // External physical button wakes display (board.is_display_on becomes true)
+        display_powered.set(true);
+
+        // Host steps and notices hardware display is ON
+        host.step();
+        assert_eq!(
+            host.screen_state(),
+            ScreenState::Awake,
+            "external display power on wakes host"
+        );
     }
 }

@@ -161,7 +161,6 @@ pub use surface::Surface;
 #[cfg(feature = "renderer")]
 pub mod hosting;
 
-#[cfg(feature = "renderer")]
 pub mod platform;
 
 pub use application::Renderer;
@@ -178,7 +177,9 @@ pub use application::Tree;
 pub use hosting::ProgramApp;
 #[cfg(feature = "renderer")]
 #[doc(hidden)]
-pub use platform::{Board, Host, Panel};
+pub use platform::{Host, ScreenState};
+#[doc(hidden)]
+pub use platform::{Board, Panel};
 
 // Hosts speak these: a touchscreen hands over a `Point`, and a panel takes a `Rectangle` to flush.
 // Re-exported so that firmware code does not have to depend on `iced_core` to talk to this layer.
