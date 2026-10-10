@@ -55,13 +55,14 @@ impl Scene {
     pub fn advance(&mut self, current: &[Layer]) -> Vec<Rectangle> {
         let damage = self.damage(current);
 
-        // Two clones of the recorded scene per frame: one to keep, one to hand `Layer::damage`
-        // without its quads. The lists are tens of items, and a frame is tens of milliseconds.
-        self.layers = current.to_vec();
-        self.quads = current.iter().map(|layer| layer.quads.clone()).collect();
-
-        for layer in &mut self.layers {
-            layer.quads.clear();
+        // Single clone pass: keep one copy of quads in `self.quads` and leave
+        // empty quads in `self.layers` for `Layer::damage` geometry diffing.
+        self.layers.clear();
+        self.quads.clear();
+        for layer in current {
+            let mut l = layer.clone();
+            self.quads.push(std::mem::take(&mut l.quads));
+            self.layers.push(l);
         }
 
         damage

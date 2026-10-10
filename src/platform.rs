@@ -332,6 +332,13 @@ where
             (None, false) => {}
         }
 
+        // Drain any pending asynchronous touch events from the hardware queue
+        // so the FreeRTOS event queue never saturates and drops critical UP events.
+        while let Some(event) = self.board.borrow().wait_touch(0) {
+            self.program.broadcast_event(event);
+            self.dirty = true;
+        }
+
         self.flushed.set(false);
         self.frame();
         let painted = self.flushed.get();
