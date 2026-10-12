@@ -91,6 +91,8 @@ pub fn install(bytes: &'static [u8]) {
 
     if let Some((_, Some(family))) = &face {
         system.raw().db_mut().set_sans_serif_family(family.clone());
+        system.raw().db_mut().set_monospace_family(family.clone());
+        system.raw().db_mut().set_serif_family(family.clone());
     }
 
     INSTALLED.store(true, Ordering::Relaxed);
