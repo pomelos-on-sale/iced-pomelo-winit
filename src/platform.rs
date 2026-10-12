@@ -11,12 +11,10 @@ use std::future::Future;
 use std::rc::Rc;
 #[cfg(feature = "renderer")]
 use std::task::{Context, Poll, Waker};
-#[cfg(feature = "renderer")]
 use std::time::Duration;
 
 #[cfg(feature = "renderer")]
 use iced_core::theme::Base;
-#[cfg(feature = "renderer")]
 use iced_core::time::Instant;
 #[cfg(feature = "renderer")]
 use iced_core::window;
@@ -68,8 +66,14 @@ extern "C" {
     fn hal_touch_wait_event(out_ev: *mut HalTouchEvent, timeout_ms: u32) -> bool;
     fn hal_display_set_power(on: bool);
     fn hal_display_is_active() -> bool;
+    #[allow(dead_code)]
+    fn hal_display_set_sleep_timeout_ms(timeout_ms: u32);
+    fn hal_display_get_sleep_timeout_ms() -> u32;
     fn vTaskDelay(ticks: u32);
 }
+
+#[cfg(not(target_os = "espidf"))]
+static SIM_SLEEP_TIMEOUT_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 #[cfg(not(target_os = "espidf"))]
 #[allow(unused_variables)]
@@ -97,6 +101,17 @@ unsafe fn hal_display_set_power(on: bool) {}
 #[cfg(not(target_os = "espidf"))]
 unsafe fn hal_display_is_active() -> bool {
     true
+}
+
+#[cfg(not(target_os = "espidf"))]
+#[allow(unused_variables, dead_code)]
+unsafe fn hal_display_set_sleep_timeout_ms(timeout_ms: u32) {
+    SIM_SLEEP_TIMEOUT_MS.store(timeout_ms, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(not(target_os = "espidf"))]
+unsafe fn hal_display_get_sleep_timeout_ms() -> u32 {
+    SIM_SLEEP_TIMEOUT_MS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(not(target_os = "espidf"))]
@@ -199,6 +214,12 @@ pub trait Board {
     fn is_display_on(&self) -> bool {
         true
     }
+
+    /// Inactivity timeout before the screen automatically sleeps.
+    /// `None` means never sleep automatically.
+    fn sleep_timeout(&self) -> Option<Duration> {
+        None
+    }
 }
 
 /// The real panel: the CO5300 over the C side's `hal_display_*`, and the touch controller behind
@@ -242,6 +263,15 @@ impl Board for Panel {
             hal_display_is_active()
         }
     }
+
+    fn sleep_timeout(&self) -> Option<Duration> {
+        let ms = unsafe { hal_display_get_sleep_timeout_ms() };
+        if ms == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(ms as u64))
+        }
+    }
 }
 
 /// The display and touch interaction power state of the host.
@@ -277,8 +307,9 @@ where
     touching: bool,
     pending_size: Option<Size>,
     screen_state: ScreenState,
+    first_frame_rendered: bool,
     last_activity: Instant,
-    sleep_timeout: Duration,
+    sleep_timeout_override: Option<Option<Duration>>,
 }
 
 #[cfg(feature = "renderer")]
@@ -342,8 +373,9 @@ where
             touching: false,
             pending_size: Some(Size::new(width as f32, height as f32)),
             screen_state: ScreenState::Awake,
+            first_frame_rendered: false,
             last_activity: now,
-            sleep_timeout: Duration::from_secs(30),
+            sleep_timeout_override: None,
         })
     }
 
@@ -356,9 +388,16 @@ where
         self.screen_state
     }
 
+    /// Returns the active inactivity timeout before the screen automatically sleeps.
+    pub fn sleep_timeout(&self) -> Option<Duration> {
+        self.sleep_timeout_override
+            .unwrap_or_else(|| self.board.borrow().sleep_timeout())
+    }
+
     /// Sets the inactivity timeout before the screen automatically sleeps.
-    pub fn set_sleep_timeout(&mut self, timeout: Duration) {
-        self.sleep_timeout = timeout;
+    /// `None` means never automatically sleep.
+    pub fn set_sleep_timeout(&mut self, timeout: Option<Duration>) {
+        self.sleep_timeout_override = Some(timeout);
     }
 
     /// Explicitly wake up the display.
@@ -419,15 +458,19 @@ where
     }
 
     pub fn step(&mut self) -> bool {
-        // 1. Sync screen state if hardware display was toggled externally (e.g. by physical button)
+        // 1. Sync screen state if hardware display was toggled externally (e.g. by physical button).
+        // Only sync display-off after the initial frame has rendered, since displays start blanked.
         let display_is_on = self.board.borrow().is_display_on();
-        if !display_is_on && self.screen_state == ScreenState::Awake {
-            if self.touching {
-                self.touching = false;
-                self.tree.touch_up();
+        if self.first_frame_rendered {
+            if !display_is_on && self.screen_state == ScreenState::Awake {
+                if self.touching {
+                    self.touching = false;
+                    self.tree.touch_up();
+                }
+                self.screen_state = ScreenState::Sleeping;
             }
-            self.screen_state = ScreenState::Sleeping;
-        } else if display_is_on && self.screen_state == ScreenState::Sleeping {
+        }
+        if display_is_on && self.screen_state == ScreenState::Sleeping {
             self.screen_state = ScreenState::Awake;
             self.last_activity = Instant::now();
             self.dirty = true;
@@ -436,9 +479,11 @@ where
         // 2. Check inactivity timeout when Awake
         let now = Instant::now();
         if self.screen_state == ScreenState::Awake && !self.touching {
-            if now.duration_since(self.last_activity) >= self.sleep_timeout {
-                self.screen_state = ScreenState::Sleeping;
-                self.board.borrow_mut().set_display_power(false);
+            if let Some(timeout) = self.sleep_timeout() {
+                if now.duration_since(self.last_activity) >= timeout {
+                    self.screen_state = ScreenState::Sleeping;
+                    self.board.borrow_mut().set_display_power(false);
+                }
             }
         }
 
@@ -510,6 +555,7 @@ where
         self.flushed.set(false);
         self.frame();
         let painted = self.flushed.get();
+        self.first_frame_rendered = true;
 
         if !painted {
             let timeout = match self.tree.next_redraw() {
@@ -741,7 +787,7 @@ mod tests {
         assert!(!clicked.load(Ordering::SeqCst));
 
         // 2. Set small timeout for test
-        host.set_sleep_timeout(Duration::from_millis(10));
+        host.set_sleep_timeout(Some(Duration::from_millis(10)));
         std::thread::sleep(Duration::from_millis(15));
 
         // Step should transition to Sleeping and power off display
@@ -816,4 +862,62 @@ mod tests {
             "external display power on wakes host"
         );
     }
+
+    #[test]
+    fn host_does_not_sleep_at_boot_when_display_starts_blanked() {
+        let touch_point = Rc::new(Cell::new(None));
+        // On real hardware, panel starts blanked (display_powered = false) until first frame!
+        let display_powered = Rc::new(Cell::new(false));
+        let board = Box::new(TestBoard {
+            touch_point: Rc::clone(&touch_point),
+            display_powered: Rc::clone(&display_powered),
+        });
+
+        let clicked = Arc::new(AtomicBool::new(false));
+        let app = TestApp {
+            clicked: Arc::clone(&clicked),
+        };
+        let mut host = Host::new(app, board).unwrap();
+
+        // 1. Initial state must be Awake
+        assert_eq!(host.screen_state(), ScreenState::Awake);
+
+        // 2. Initial step must render and STAY Awake (not immediately go to sleep!)
+        host.step();
+        assert_eq!(
+            host.screen_state(),
+            ScreenState::Awake,
+            "host must remain Awake on boot to render first frame even if display starts blanked"
+        );
+    }
+
+    #[test]
+    fn host_does_not_sleep_when_sleep_timeout_is_none() {
+        let touch_point = Rc::new(Cell::new(None));
+        let display_powered = Rc::new(Cell::new(true));
+        let board = Box::new(TestBoard {
+            touch_point: Rc::clone(&touch_point),
+            display_powered: Rc::clone(&display_powered),
+        });
+
+        let clicked = Arc::new(AtomicBool::new(false));
+        let app = TestApp {
+            clicked: Arc::clone(&clicked),
+        };
+        let mut host = Host::new(app, board).unwrap();
+
+        // Initial frame draw
+        host.step();
+        assert_eq!(host.screen_state(), ScreenState::Awake);
+
+        // Sleep timeout is None by default
+        assert_eq!(host.sleep_timeout(), None);
+        std::thread::sleep(Duration::from_millis(20));
+
+        // Step should remain Awake
+        host.step();
+        assert_eq!(host.screen_state(), ScreenState::Awake);
+        assert!(display_powered.get());
+    }
 }
+
