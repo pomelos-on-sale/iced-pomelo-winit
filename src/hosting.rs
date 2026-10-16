@@ -235,12 +235,22 @@ where
                 None
             }
 
-            // Everything else is a desktop platform action: the clipboard, window, system and
-            // image actions have nothing to act on here -- one panel, no window manager, no
-            // clipboard, no system theme. `Reload` rebuilds every window, `Exit` ends a process.
-            // Ignoring them is a decision rather than an oversight, which is why they are listed.
-            Action::Clipboard(_)
-            | Action::Window(_)
+            Action::Clipboard(action) => match action {
+                iced_runtime::clipboard::Action::Read { target, channel } => {
+                    let content = crate::clipboard::read(target);
+                    let _ = channel.send(content);
+                    None
+                }
+                iced_runtime::clipboard::Action::Write { target, contents } => {
+                    crate::clipboard::write(target, contents);
+                    None
+                }
+            },
+
+            // Everything else is a desktop platform action: window, system and image actions
+            // have nothing to act on here -- one panel, no window manager, no system theme.
+            // `Reload` rebuilds every window, `Exit` ends a process.
+            Action::Window(_)
             | Action::System(_)
             | Action::Image(_)
             | Action::Reload

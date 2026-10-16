@@ -132,8 +132,10 @@ pub use iced_graphics as graphics;
 pub use iced_program as program;
 pub use iced_runtime as runtime;
 
+pub mod clipboard;
 pub mod error;
 
+pub use clipboard::PomeloClipboard;
 pub use error::Error;
 
 pub mod application;

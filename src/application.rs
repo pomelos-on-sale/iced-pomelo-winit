@@ -8,7 +8,7 @@
 
 use iced_core::widget::{operation::Outcome, Operation};
 use iced_core::{
-    clipboard, mouse, renderer, theme, touch, window, Color, Element, Event, Point, Size,
+    mouse, renderer, theme, touch, window, Color, Element, Event, Point, Size,
 };
 use iced_runtime::user_interface::{Cache, State, UserInterface};
 use std::time::Instant;
@@ -38,7 +38,7 @@ pub type Renderer = iced_tiny_skia::Renderer;
 pub struct Tree {
     cache: Cache,
     cursor: mouse::Cursor,
-    clipboard: clipboard::Null,
+    clipboard: crate::clipboard::PomeloClipboard,
     events: Vec<Event>,
     /// Widget operations waiting for the next [`Tree::draw`] to apply them. They need the
     /// `UserInterface`, which only exists inside that call -- see [`Tree::queue_operations`].
@@ -51,7 +51,7 @@ impl Tree {
         Self {
             cache: Cache::new(),
             cursor: mouse::Cursor::Unavailable,
-            clipboard: clipboard::Null,
+            clipboard: crate::clipboard::PomeloClipboard,
             events: Vec::new(),
             operations: Vec::new(),
             next_redraw: None,
