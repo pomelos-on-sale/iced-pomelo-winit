@@ -15,6 +15,7 @@ use std::time::Duration;
 
 #[cfg(feature = "renderer")]
 use iced_core::theme::Base;
+#[cfg(feature = "renderer")]
 use iced_core::time::Instant;
 #[cfg(feature = "renderer")]
 use iced_core::window;
@@ -504,9 +505,36 @@ where
                     self.dirty = true;
                     // Do NOT pass this initial touch to tree or program!
                 } else {
-                    // Remain asleep: skip frame presentation to save power/CPU
-                    self.board.borrow_mut().idle();
-                    return false;
+                    // Poll background subscriptions and tasks even while sleeping,
+                    // without rendering/drawing frames to save CPU and display power.
+                    for message in self.program.poll() {
+                        self.program.update(message);
+                        self.dirty = true;
+                    }
+
+                    // Check if program update explicitly woke up the screen (e.g. Daily Schedule alert)
+                    if self.board.borrow().is_display_on() {
+                        self.screen_state = ScreenState::Awake;
+                        self.last_activity = Instant::now();
+                        self.dirty = true;
+                        // Yield this sleep iteration so display power rails, PMIC, and audio sink
+                        // have time to stabilize before rendering the first full awake frame.
+                        self.board.borrow_mut().idle();
+                        return false;
+                    } else {
+                        // Remain asleep: sleep / wait for touch or timeout
+                        let event = self.board.borrow().wait_touch(50);
+                        if event.is_some() || self.board.borrow().touch().is_some() {
+                            self.board.borrow_mut().set_display_power(true);
+                            self.screen_state = ScreenState::WakingUp;
+                            self.touching = true;
+                            self.last_activity = Instant::now();
+                            self.dirty = true;
+                        } else {
+                            self.board.borrow_mut().idle();
+                        }
+                        return false;
+                    }
                 }
             }
             ScreenState::WakingUp => {
@@ -714,10 +742,12 @@ mod tests {
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum TestMsg {
         Clicked,
+        Wake,
     }
 
     struct TestApp {
         clicked: Arc<AtomicBool>,
+        display_powered: Option<Rc<Cell<bool>>>,
     }
 
     impl Program for TestApp {
@@ -744,8 +774,13 @@ mod tests {
         }
 
         fn update(&self, _state: &mut Self::State, message: Self::Message) -> Task<Self::Message> {
-            if message == TestMsg::Clicked {
-                self.clicked.store(true, Ordering::SeqCst);
+            match message {
+                TestMsg::Clicked => self.clicked.store(true, Ordering::SeqCst),
+                TestMsg::Wake => {
+                    if let Some(dp) = &self.display_powered {
+                        dp.set(true);
+                    }
+                }
             }
             Task::none()
         }
@@ -775,6 +810,7 @@ mod tests {
         let clicked = Arc::new(AtomicBool::new(false));
         let app = TestApp {
             clicked: Arc::clone(&clicked),
+            display_powered: None,
         };
         let mut host = Host::new(app, board).unwrap();
 
@@ -843,6 +879,7 @@ mod tests {
         let clicked = Arc::new(AtomicBool::new(false));
         let app = TestApp {
             clicked: Arc::clone(&clicked),
+            display_powered: None,
         };
         let mut host = Host::new(app, board).unwrap();
 
@@ -876,6 +913,7 @@ mod tests {
         let clicked = Arc::new(AtomicBool::new(false));
         let app = TestApp {
             clicked: Arc::clone(&clicked),
+            display_powered: None,
         };
         let mut host = Host::new(app, board).unwrap();
 
@@ -903,6 +941,7 @@ mod tests {
         let clicked = Arc::new(AtomicBool::new(false));
         let app = TestApp {
             clicked: Arc::clone(&clicked),
+            display_powered: None,
         };
         let mut host = Host::new(app, board).unwrap();
 
@@ -916,6 +955,40 @@ mod tests {
 
         // Step should remain Awake
         host.step();
+        assert_eq!(host.screen_state(), ScreenState::Awake);
+        assert!(display_powered.get());
+    }
+
+    #[test]
+    fn host_background_poll_and_wake_while_sleeping() {
+        let touch_point = Rc::new(Cell::new(None));
+        let display_powered = Rc::new(Cell::new(true));
+        let board = Box::new(TestBoard {
+            touch_point: Rc::clone(&touch_point),
+            display_powered: Rc::clone(&display_powered),
+        });
+
+        let clicked = Arc::new(AtomicBool::new(false));
+        let app = TestApp {
+            clicked: Arc::clone(&clicked),
+            display_powered: Some(Rc::clone(&display_powered)),
+        };
+        let mut host = Host::new(app, board).unwrap();
+
+        // 1. Initial draw
+        host.step();
+        assert_eq!(host.screen_state(), ScreenState::Awake);
+
+        // 2. Put host to sleep
+        host.sleep();
+        assert_eq!(host.screen_state(), ScreenState::Sleeping);
+        assert!(!display_powered.get());
+
+        // 3. While sleeping, an async event or background update sets display power
+        host.program.update(TestMsg::Wake);
+        // Step processes background state and notices display is now ON
+        host.step();
+
         assert_eq!(host.screen_state(), ScreenState::Awake);
         assert!(display_powered.get());
     }
