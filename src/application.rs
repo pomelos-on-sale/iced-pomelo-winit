@@ -93,15 +93,7 @@ impl Tree {
 
     /// A finger touched the panel at `point`.
     pub fn touch_down(&mut self, point: Point) {
-        // A touchscreen has no hover, so the press is three things at once: the pointer appears,
-        // it is here, and the left button goes down. The mouse events keep button hit-testing
-        // working; the touch event feeds iced's Scrollable touch-drag state machine.
         self.move_cursor(point);
-        self.events
-            .push(Event::Mouse(mouse::Event::CursorMoved { position: point }));
-        self.events.push(Event::Mouse(mouse::Event::ButtonPressed(
-            mouse::Button::Left,
-        )));
         self.events.push(Event::Touch(touch::Event::FingerPressed {
             id: touch::Finger(0),
             position: point,
@@ -119,9 +111,6 @@ impl Tree {
 
         if moved {
             self.move_cursor(point);
-            self.events
-                .push(Event::Mouse(mouse::Event::CursorMoved { position: point }));
-            // Scrollable's touch drag-to-scroll requires Event::Touch, not Event::Mouse.
             self.events.push(Event::Touch(touch::Event::FingerMoved {
                 id: touch::Finger(0),
                 position: point,
@@ -132,10 +121,6 @@ impl Tree {
     /// The finger left the panel. The pointer stays where it was, because the widget that
     /// handles the release is the one under it.
     pub fn touch_up(&mut self) {
-        self.events.push(Event::Mouse(mouse::Event::ButtonReleased(
-            mouse::Button::Left,
-        )));
-        // Mirror the FingerLifted so Scrollable's TouchScrolling state is reset cleanly.
         let position = self.cursor.position().unwrap_or(Point::ORIGIN);
         self.events.push(Event::Touch(touch::Event::FingerLifted {
             id: touch::Finger(0),
@@ -314,3 +299,115 @@ impl Default for Tree {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced_core::touch;
+
+    #[test]
+    fn touch_generates_single_events() {
+        let mut tree = Tree::new();
+        let pt = Point::new(100.0, 100.0);
+
+        tree.touch_down(pt);
+        assert_eq!(tree.events.len(), 1);
+        assert!(matches!(
+            tree.events[0],
+            Event::Touch(touch::Event::FingerPressed { position, .. }) if position == pt
+        ));
+        assert_eq!(tree.cursor, mouse::Cursor::Available(pt));
+
+        tree.events.clear();
+        let pt2 = Point::new(120.0, 120.0);
+        tree.touch_move(pt2);
+        assert_eq!(tree.events.len(), 1);
+        assert!(matches!(
+            tree.events[0],
+            Event::Touch(touch::Event::FingerMoved { position, .. }) if position == pt2
+        ));
+        assert_eq!(tree.cursor, mouse::Cursor::Available(pt2));
+
+        tree.events.clear();
+        tree.touch_up();
+        assert_eq!(tree.events.len(), 1);
+        assert!(matches!(
+            tree.events[0],
+            Event::Touch(touch::Event::FingerLifted { position, .. }) if position == pt2
+        ));
+    }
+
+    #[test]
+    fn pick_list_opens_on_touch_down() {
+        use iced_widget::pick_list;
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum OptionItem {
+            A,
+            B,
+        }
+        impl std::fmt::Display for OptionItem {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{:?}", self)
+            }
+        }
+
+        let mut tree = Tree::new();
+        let options = [OptionItem::A, OptionItem::B];
+        let selected = Some(OptionItem::A);
+
+        let mut renderer = iced_tiny_skia::Renderer::new(
+            iced_core::Font::DEFAULT,
+            iced_core::Pixels(16.0),
+        );
+        let bounds = Size::new(480.0, 480.0);
+
+        // Frame 1: initial layout
+        let view: Element<'_, OptionItem, iced_core::Theme, iced_tiny_skia::Renderer> =
+            Element::new(pick_list(&options[..], selected, |opt| opt).on_open(OptionItem::B));
+        let mut messages = Vec::new();
+        tree.draw(
+            &mut renderer,
+            view,
+            &mut messages,
+            &iced_core::Theme::Dark,
+            bounds,
+            Color::WHITE,
+        );
+
+        // Touch on the pick_list widget at (10, 10)
+        tree.touch_down(Point::new(10.0, 10.0));
+
+        // Frame 2: process touch_down
+        let view: Element<'_, OptionItem, iced_core::Theme, iced_tiny_skia::Renderer> =
+            Element::new(pick_list(&options[..], selected, |opt| opt).on_open(OptionItem::B));
+        let mut messages = Vec::new();
+        tree.draw(
+            &mut renderer,
+            view,
+            &mut messages,
+            &iced_core::Theme::Dark,
+            bounds,
+            Color::WHITE,
+        );
+
+        assert_eq!(messages, vec![OptionItem::B], "pick_list should publish on_open message when opened by touch");
+
+        // Frame 3: touch on option B in the overlay menu
+        tree.touch_down(Point::new(10.0, 70.0));
+        let view: Element<'_, OptionItem, iced_core::Theme, iced_tiny_skia::Renderer> =
+            Element::new(pick_list(&options[..], selected, |opt| opt).on_open(OptionItem::B));
+        let mut messages = Vec::new();
+        tree.draw(
+            &mut renderer,
+            view,
+            &mut messages,
+            &iced_core::Theme::Dark,
+            bounds,
+            Color::WHITE,
+        );
+
+        assert_eq!(messages, vec![OptionItem::B], "touching option should select it");
+    }
+}
+
