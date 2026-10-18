@@ -68,11 +68,19 @@ extern "C" {
     fn hal_display_set_power(on: bool);
     fn hal_display_is_active() -> bool;
     #[allow(dead_code)]
-    fn hal_display_set_sleep_timeout_ms(timeout_ms: u32);
-    fn hal_display_get_sleep_timeout_ms() -> u32;
+    fn hal_display_set_screen_off_timeout_ms(timeout_ms: u32);
+    fn hal_display_get_screen_off_timeout_ms() -> u32;
+    #[allow(dead_code)]
+    fn hal_power_set_sleep_timeout_ms(timeout_ms: u32);
+    fn hal_power_get_sleep_timeout_ms() -> u32;
+    fn hal_power_enter_light_sleep(max_sleep_ms: u32) -> u32;
+    fn hal_power_is_usb_connected() -> bool;
+    fn hal_power_get_stay_awake_on_usb() -> bool;
     fn vTaskDelay(ticks: u32);
 }
 
+#[cfg(not(target_os = "espidf"))]
+static SIM_SCREEN_OFF_TIMEOUT_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 #[cfg(not(target_os = "espidf"))]
 static SIM_SLEEP_TIMEOUT_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -106,13 +114,45 @@ unsafe fn hal_display_is_active() -> bool {
 
 #[cfg(not(target_os = "espidf"))]
 #[allow(unused_variables, dead_code)]
-unsafe fn hal_display_set_sleep_timeout_ms(timeout_ms: u32) {
+unsafe fn hal_display_set_screen_off_timeout_ms(timeout_ms: u32) {
+    SIM_SCREEN_OFF_TIMEOUT_MS.store(timeout_ms, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(not(target_os = "espidf"))]
+unsafe fn hal_display_get_screen_off_timeout_ms() -> u32 {
+    SIM_SCREEN_OFF_TIMEOUT_MS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(not(target_os = "espidf"))]
+#[allow(unused_variables, dead_code)]
+unsafe fn hal_power_set_sleep_timeout_ms(timeout_ms: u32) {
     SIM_SLEEP_TIMEOUT_MS.store(timeout_ms, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(not(target_os = "espidf"))]
-unsafe fn hal_display_get_sleep_timeout_ms() -> u32 {
+unsafe fn hal_power_get_sleep_timeout_ms() -> u32 {
     SIM_SLEEP_TIMEOUT_MS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(not(target_os = "espidf"))]
+static SIM_USB_CONNECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(not(target_os = "espidf"))]
+static SIM_STAY_AWAKE_ON_USB: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+#[cfg(not(target_os = "espidf"))]
+unsafe fn hal_power_is_usb_connected() -> bool {
+    SIM_USB_CONNECTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(not(target_os = "espidf"))]
+unsafe fn hal_power_get_stay_awake_on_usb() -> bool {
+    SIM_STAY_AWAKE_ON_USB.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(not(target_os = "espidf"))]
+#[allow(unused_variables)]
+unsafe fn hal_power_enter_light_sleep(max_sleep_ms: u32) -> u32 {
+    0
 }
 
 #[cfg(not(target_os = "espidf"))]
@@ -216,9 +256,35 @@ pub trait Board {
         true
     }
 
-    /// Inactivity timeout before the screen automatically sleeps.
-    /// `None` means never sleep automatically.
+    /// Inactivity timeout before the screen automatically turns off.
+    /// `None` means never turn off automatically.
+    fn screen_off_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Inactivity timeout after screen off before the system automatically enters sleep.
+    /// `None` means never enter sleep automatically.
     fn sleep_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Whether USB (VBUS) is currently connected.
+    fn is_usb_connected(&self) -> bool {
+        false
+    }
+
+    /// Whether to stay awake when USB is connected (defaults to true).
+    fn stay_awake_on_usb(&self) -> bool {
+        true
+    }
+
+    /// Low-power sleep: suspends CPU for up to `max_duration`.
+    fn enter_sleep(&mut self, _max_duration: Option<Duration>) -> WakeupReason {
+        WakeupReason::None
+    }
+
+    /// Returns duration remaining until the nearest scheduled wakeup, if any.
+    fn next_wakeup_duration(&self) -> Option<Duration> {
         None
     }
 }
@@ -265,22 +331,62 @@ impl Board for Panel {
         }
     }
 
-    fn sleep_timeout(&self) -> Option<Duration> {
-        let ms = unsafe { hal_display_get_sleep_timeout_ms() };
+    fn screen_off_timeout(&self) -> Option<Duration> {
+        let ms = unsafe { hal_display_get_screen_off_timeout_ms() };
         if ms == 0 {
             None
         } else {
             Some(Duration::from_millis(ms as u64))
         }
     }
+
+    fn sleep_timeout(&self) -> Option<Duration> {
+        let ms = unsafe { hal_power_get_sleep_timeout_ms() };
+        if ms == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(ms as u64))
+        }
+    }
+
+    fn is_usb_connected(&self) -> bool {
+        unsafe { hal_power_is_usb_connected() }
+    }
+
+    fn stay_awake_on_usb(&self) -> bool {
+        unsafe { hal_power_get_stay_awake_on_usb() }
+    }
+
+    fn enter_sleep(&mut self, max_duration: Option<Duration>) -> WakeupReason {
+        let ms = max_duration.map(|d| d.as_millis().min(u32::MAX as u128) as u32).unwrap_or(0);
+        let ret = unsafe { hal_power_enter_light_sleep(ms) };
+        match ret {
+            1 => WakeupReason::Timer,
+            2 => WakeupReason::Gpio,
+            3 => WakeupReason::Touch,
+            _ => WakeupReason::None,
+        }
+    }
 }
 
-/// The display and touch interaction power state of the host.
+/// Wakeup source reasons after waking up from low-power sleep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeupReason {
+    None,
+    Timer,
+    Gpio,
+    Touch,
+    Unknown,
+}
+
+/// The display and system power state of the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenState {
     /// Screen is on and interactive.
     Awake,
-    /// Screen is powered off (sleeping).
+    /// Screen is powered off (UI rendering is paused, processes/tasks still running).
+    ScreenOff,
+    /// System is sleeping (CPU suspended in low-power light sleep).
     Sleeping,
     /// Screen was just turned on by a touch gesture; initial touch is swallowed until finger lifts.
     WakingUp,
@@ -310,7 +416,10 @@ where
     screen_state: ScreenState,
     first_frame_rendered: bool,
     last_activity: Instant,
+    screen_off_at: Option<Instant>,
+    screen_off_timeout_override: Option<Option<Duration>>,
     sleep_timeout_override: Option<Option<Duration>>,
+    stay_awake_on_usb_override: Option<bool>,
 }
 
 #[cfg(feature = "renderer")]
@@ -376,7 +485,10 @@ where
             screen_state: ScreenState::Awake,
             first_frame_rendered: false,
             last_activity: now,
+            screen_off_at: None,
+            screen_off_timeout_override: None,
             sleep_timeout_override: None,
+            stay_awake_on_usb_override: None,
         })
     }
 
@@ -389,16 +501,39 @@ where
         self.screen_state
     }
 
-    /// Returns the active inactivity timeout before the screen automatically sleeps.
+    /// Returns the active inactivity timeout before the screen automatically turns off.
+    pub fn screen_off_timeout(&self) -> Option<Duration> {
+        self.screen_off_timeout_override
+            .unwrap_or_else(|| self.board.borrow().screen_off_timeout())
+    }
+
+    /// Sets the inactivity timeout before the screen automatically turns off.
+    /// `None` means never automatically turn off.
+    pub fn set_screen_off_timeout(&mut self, timeout: Option<Duration>) {
+        self.screen_off_timeout_override = Some(timeout);
+    }
+
+    /// Returns the active inactivity timeout after screen off before the system sleeps.
     pub fn sleep_timeout(&self) -> Option<Duration> {
         self.sleep_timeout_override
             .unwrap_or_else(|| self.board.borrow().sleep_timeout())
     }
 
-    /// Sets the inactivity timeout before the screen automatically sleeps.
+    /// Sets the inactivity timeout after screen off before the system sleeps.
     /// `None` means never automatically sleep.
     pub fn set_sleep_timeout(&mut self, timeout: Option<Duration>) {
         self.sleep_timeout_override = Some(timeout);
+    }
+
+    /// Returns whether the system stays awake while connected to USB.
+    pub fn stay_awake_on_usb(&self) -> bool {
+        self.stay_awake_on_usb_override
+            .unwrap_or_else(|| self.board.borrow().stay_awake_on_usb())
+    }
+
+    /// Sets whether the system stays awake while connected to USB.
+    pub fn set_stay_awake_on_usb(&mut self, stay_awake: bool) {
+        self.stay_awake_on_usb_override = Some(stay_awake);
     }
 
     /// Explicitly wake up the display.
@@ -406,19 +541,35 @@ where
         if self.screen_state != ScreenState::Awake {
             self.board.borrow_mut().set_display_power(true);
             self.screen_state = ScreenState::Awake;
+            self.screen_off_at = None;
             self.last_activity = Instant::now();
             self.dirty = true;
         }
     }
 
-    /// Explicitly put the screen to sleep.
-    pub fn sleep(&mut self) {
+    /// Explicitly turn the screen off (processes/tasks keep running).
+    pub fn screen_off(&mut self) {
         if self.screen_state == ScreenState::Awake {
             if self.touching {
                 self.touching = false;
                 self.tree.touch_up();
             }
             self.board.borrow_mut().set_display_power(false);
+            self.screen_state = ScreenState::ScreenOff;
+            self.screen_off_at = Some(Instant::now());
+        }
+    }
+
+    /// Explicitly put the system to sleep.
+    pub fn sleep(&mut self) {
+        if self.screen_state == ScreenState::Awake || self.screen_state == ScreenState::ScreenOff {
+            if self.touching {
+                self.touching = false;
+                self.tree.touch_up();
+            }
+            if self.board.borrow().is_display_on() {
+                self.board.borrow_mut().set_display_power(false);
+            }
             self.screen_state = ScreenState::Sleeping;
         }
     }
@@ -468,70 +619,150 @@ where
                     self.touching = false;
                     self.tree.touch_up();
                 }
-                self.screen_state = ScreenState::Sleeping;
+                self.screen_state = ScreenState::ScreenOff;
+                self.screen_off_at = Some(Instant::now());
             }
         }
-        if display_is_on && self.screen_state == ScreenState::Sleeping {
+        if display_is_on && (self.screen_state == ScreenState::ScreenOff || self.screen_state == ScreenState::Sleeping) {
             self.screen_state = ScreenState::Awake;
+            self.screen_off_at = None;
             self.last_activity = Instant::now();
             self.dirty = true;
         }
 
-        // 2. Check inactivity timeout when Awake
+        // 2. Check inactivity timeout when Awake -> ScreenOff
         let now = Instant::now();
         if self.screen_state == ScreenState::Awake && !self.touching {
-            if let Some(timeout) = self.sleep_timeout() {
+            if let Some(timeout) = self.screen_off_timeout() {
                 if now.duration_since(self.last_activity) >= timeout {
-                    self.screen_state = ScreenState::Sleeping;
+                    self.screen_state = ScreenState::ScreenOff;
+                    self.screen_off_at = Some(now);
                     self.board.borrow_mut().set_display_power(false);
                 }
             }
         }
 
-        // 3. Handle touch & event stream according to screen state
+        // 3. Check inactivity timeout when ScreenOff -> Sleeping
+        if self.screen_state == ScreenState::ScreenOff {
+            let stay_awake = self.stay_awake_on_usb() && self.board.borrow().is_usb_connected();
+            if !stay_awake {
+                if let Some(sleep_timeout) = self.sleep_timeout() {
+                    let off_since = self.screen_off_at.unwrap_or(self.last_activity);
+                    if now.duration_since(off_since) >= sleep_timeout {
+                        println!("[power] Inactivity timeout reached ({}s), entering low-power light sleep", sleep_timeout.as_secs());
+                        self.screen_state = ScreenState::Sleeping;
+                    }
+                }
+            }
+        }
+
+        // 4. Handle touch & event stream according to screen state
         let point = self.board.borrow().touch();
 
         match self.screen_state {
-            ScreenState::Sleeping => {
-                // Drain and discard any buffered touch interrupt events while asleep
+            ScreenState::ScreenOff => {
+                // Drain and discard any buffered touch interrupt events while screen is off
                 while self.board.borrow().wait_touch(0).is_some() {}
 
                 if let Some(_pt) = point {
-                    // First touch on sleeping panel: WAKE UP & SWALLOW
+                    // Touch on ScreenOff panel: WAKE UP & SWALLOW
+                    println!("[display] ScreenOff woken up by touch point");
                     self.board.borrow_mut().set_display_power(true);
                     self.screen_state = ScreenState::WakingUp;
                     self.touching = true;
+                    self.screen_off_at = None;
                     self.last_activity = Instant::now();
                     self.dirty = true;
                     // Do NOT pass this initial touch to tree or program!
                 } else {
-                    // Poll background subscriptions and tasks even while sleeping,
+                    // Poll background subscriptions and tasks even while screen is off,
                     // without rendering/drawing frames to save CPU and display power.
                     for message in self.program.poll() {
                         self.program.update(message);
                         self.dirty = true;
                     }
 
-                    // Check if program update explicitly woke up the screen (e.g. Daily Schedule alert)
+                    // Check if program update explicitly woke up the screen
                     if self.board.borrow().is_display_on() {
                         self.screen_state = ScreenState::Awake;
+                        self.screen_off_at = None;
                         self.last_activity = Instant::now();
                         self.dirty = true;
-                        // Yield this sleep iteration so display power rails, PMIC, and audio sink
-                        // have time to stabilize before rendering the first full awake frame.
                         self.board.borrow_mut().idle();
                         return false;
                     } else {
-                        // Remain asleep: sleep / wait for touch or timeout
+                        // Remain in ScreenOff: wait for touch or short timeout
                         let event = self.board.borrow().wait_touch(50);
-                        if event.is_some() || self.board.borrow().touch().is_some() {
+                        let is_touch_down = match event {
+                            Some(iced_core::Event::Touch(iced_core::touch::Event::FingerPressed { .. })) => true,
+                            _ => false,
+                        };
+                        if is_touch_down || self.board.borrow().touch().is_some() {
+                            println!("[display] ScreenOff woken up by touch tap");
                             self.board.borrow_mut().set_display_power(true);
                             self.screen_state = ScreenState::WakingUp;
                             self.touching = true;
+                            self.screen_off_at = None;
                             self.last_activity = Instant::now();
                             self.dirty = true;
                         } else {
                             self.board.borrow_mut().idle();
+                        }
+                        return false;
+                    }
+                }
+            }
+            ScreenState::Sleeping => {
+                // Low-power sleep: suspend CPU until next scheduled wakeup timer or GPIO/touch
+                let next_dur = self.board.borrow().next_wakeup_duration();
+                let reason = self.board.borrow_mut().enter_sleep(next_dur);
+                println!("[power] Woke up from sleep with reason: {:?}", reason);
+
+                // Wakeup handling:
+                // User requirement: "当系统从 Sleep 中被定时器唤醒时，通常都是需要点亮屏幕的。"
+                match reason {
+                    WakeupReason::Timer => {
+                        self.board.borrow_mut().set_display_power(true);
+                        self.screen_state = ScreenState::Awake;
+                        self.touching = false;
+                        self.screen_off_at = None;
+                        self.last_activity = Instant::now();
+                        self.dirty = true;
+
+                        for message in self.program.poll() {
+                            self.program.update(message);
+                            self.dirty = true;
+                        }
+                        return false;
+                    }
+                    WakeupReason::Touch => {
+                        self.board.borrow_mut().set_display_power(true);
+                        self.screen_state = ScreenState::WakingUp;
+                        self.touching = true;
+                        self.screen_off_at = None;
+                        self.last_activity = Instant::now();
+                        self.dirty = true;
+                        while self.board.borrow().wait_touch(0).is_some() {}
+                        return false;
+                    }
+                    WakeupReason::Gpio | WakeupReason::Unknown => {
+                        self.board.borrow_mut().set_display_power(true);
+                        self.screen_state = ScreenState::Awake;
+                        self.touching = false;
+                        self.screen_off_at = None;
+                        self.last_activity = Instant::now();
+                        self.dirty = true;
+                        return false;
+                    }
+                    WakeupReason::None => {
+                        if self.board.borrow().touch().is_some() {
+                            self.board.borrow_mut().set_display_power(true);
+                            self.screen_state = ScreenState::WakingUp;
+                            self.touching = true;
+                            self.screen_off_at = None;
+                            self.last_activity = Instant::now();
+                            self.dirty = true;
+                            while self.board.borrow().wait_touch(0).is_some() {}
                         }
                         return false;
                     }
@@ -548,6 +779,7 @@ where
                     // Finger was lifted: wake gesture completed! Now fully awake.
                     self.screen_state = ScreenState::Awake;
                     self.touching = false;
+                    self.screen_off_at = None;
                     self.last_activity = Instant::now();
                     self.dirty = true;
                 }
@@ -717,6 +949,7 @@ mod tests {
     struct TestBoard {
         touch_point: Rc<Cell<Option<Point>>>,
         display_powered: Rc<Cell<bool>>,
+        wake_reason: Rc<Cell<WakeupReason>>,
     }
 
     impl Board for TestBoard {
@@ -736,6 +969,10 @@ mod tests {
 
         fn is_display_on(&self) -> bool {
             self.display_powered.get()
+        }
+
+        fn enter_sleep(&mut self, _max_duration: Option<Duration>) -> WakeupReason {
+            self.wake_reason.get()
         }
     }
 
@@ -799,12 +1036,14 @@ mod tests {
     }
 
     #[test]
-    fn host_auto_sleep_and_wake_up_touch_swallow() {
+    fn host_auto_screen_off_and_wake_up_touch_swallow() {
         let touch_point = Rc::new(Cell::new(None));
         let display_powered = Rc::new(Cell::new(true));
+        let wake_reason = Rc::new(Cell::new(WakeupReason::None));
         let board = Box::new(TestBoard {
             touch_point: Rc::clone(&touch_point),
             display_powered: Rc::clone(&display_powered),
+            wake_reason: Rc::clone(&wake_reason),
         });
 
         let clicked = Arc::new(AtomicBool::new(false));
@@ -823,12 +1062,12 @@ mod tests {
         assert!(!clicked.load(Ordering::SeqCst));
 
         // 2. Set small timeout for test
-        host.set_sleep_timeout(Some(Duration::from_millis(10)));
+        host.set_screen_off_timeout(Some(Duration::from_millis(10)));
         std::thread::sleep(Duration::from_millis(15));
 
-        // Step should transition to Sleeping and power off display
+        // Step should transition to ScreenOff and power off display
         host.step();
-        assert_eq!(host.screen_state(), ScreenState::Sleeping);
+        assert_eq!(host.screen_state(), ScreenState::ScreenOff);
         assert!(!display_powered.get(), "display should have been powered off");
 
         // 3. User touches screen to wake up (finger down at center 240, 240)
@@ -868,12 +1107,57 @@ mod tests {
     }
 
     #[test]
-    fn host_external_button_wake() {
+    fn host_system_sleep_and_timer_wake() {
         let touch_point = Rc::new(Cell::new(None));
         let display_powered = Rc::new(Cell::new(true));
+        let wake_reason = Rc::new(Cell::new(WakeupReason::None));
         let board = Box::new(TestBoard {
             touch_point: Rc::clone(&touch_point),
             display_powered: Rc::clone(&display_powered),
+            wake_reason: Rc::clone(&wake_reason),
+        });
+
+        let clicked = Arc::new(AtomicBool::new(false));
+        let app = TestApp {
+            clicked: Arc::clone(&clicked),
+            display_powered: None,
+        };
+        let mut host = Host::new(app, board).unwrap();
+
+        host.set_screen_off_timeout(Some(Duration::from_millis(10)));
+        host.set_sleep_timeout(Some(Duration::from_millis(10)));
+
+        host.step();
+        assert_eq!(host.screen_state(), ScreenState::Awake);
+
+        // 1. Inactivity reaches screen off timeout -> ScreenOff
+        std::thread::sleep(Duration::from_millis(15));
+        host.step();
+        assert_eq!(host.screen_state(), ScreenState::ScreenOff);
+        assert!(!display_powered.get());
+
+        // 2. Further inactivity reaches sleep timeout -> Sleeping
+        std::thread::sleep(Duration::from_millis(15));
+        host.step();
+        assert_eq!(host.screen_state(), ScreenState::Sleeping);
+
+        // 3. System is woken up from Sleep by a Timer: MUST TURN ON DISPLAY!
+        wake_reason.set(WakeupReason::Timer);
+        host.step();
+
+        assert_eq!(host.screen_state(), ScreenState::Awake, "timer wakeup must wake system to Awake");
+        assert!(display_powered.get(), "timer wakeup must turn on display");
+    }
+
+    #[test]
+    fn host_external_button_wake() {
+        let touch_point = Rc::new(Cell::new(None));
+        let display_powered = Rc::new(Cell::new(true));
+        let wake_reason = Rc::new(Cell::new(WakeupReason::None));
+        let board = Box::new(TestBoard {
+            touch_point: Rc::clone(&touch_point),
+            display_powered: Rc::clone(&display_powered),
+            wake_reason: Rc::clone(&wake_reason),
         });
 
         let clicked = Arc::new(AtomicBool::new(false));
@@ -905,9 +1189,11 @@ mod tests {
         let touch_point = Rc::new(Cell::new(None));
         // On real hardware, panel starts blanked (display_powered = false) until first frame!
         let display_powered = Rc::new(Cell::new(false));
+        let wake_reason = Rc::new(Cell::new(WakeupReason::None));
         let board = Box::new(TestBoard {
             touch_point: Rc::clone(&touch_point),
             display_powered: Rc::clone(&display_powered),
+            wake_reason: Rc::clone(&wake_reason),
         });
 
         let clicked = Arc::new(AtomicBool::new(false));
@@ -933,9 +1219,11 @@ mod tests {
     fn host_does_not_sleep_when_sleep_timeout_is_none() {
         let touch_point = Rc::new(Cell::new(None));
         let display_powered = Rc::new(Cell::new(true));
+        let wake_reason = Rc::new(Cell::new(WakeupReason::None));
         let board = Box::new(TestBoard {
             touch_point: Rc::clone(&touch_point),
             display_powered: Rc::clone(&display_powered),
+            wake_reason: Rc::clone(&wake_reason),
         });
 
         let clicked = Arc::new(AtomicBool::new(false));
@@ -949,7 +1237,8 @@ mod tests {
         host.step();
         assert_eq!(host.screen_state(), ScreenState::Awake);
 
-        // Sleep timeout is None by default
+        // Timeouts are None by default
+        assert_eq!(host.screen_off_timeout(), None);
         assert_eq!(host.sleep_timeout(), None);
         std::thread::sleep(Duration::from_millis(20));
 
@@ -960,12 +1249,48 @@ mod tests {
     }
 
     #[test]
-    fn host_background_poll_and_wake_while_sleeping() {
+    fn host_does_not_turn_off_screen_when_screen_off_timeout_is_none_even_if_sleep_timeout_is_set() {
         let touch_point = Rc::new(Cell::new(None));
         let display_powered = Rc::new(Cell::new(true));
+        let wake_reason = Rc::new(Cell::new(WakeupReason::None));
         let board = Box::new(TestBoard {
             touch_point: Rc::clone(&touch_point),
             display_powered: Rc::clone(&display_powered),
+            wake_reason: Rc::clone(&wake_reason),
+        });
+
+        let clicked = Arc::new(AtomicBool::new(false));
+        let app = TestApp {
+            clicked: Arc::clone(&clicked),
+            display_powered: None,
+        };
+        let mut host = Host::new(app, board).unwrap();
+
+        // Screen off: Never (None), Sleep: 10ms
+        host.set_screen_off_timeout(None);
+        host.set_sleep_timeout(Some(Duration::from_millis(10)));
+
+        host.step();
+        assert_eq!(host.screen_state(), ScreenState::Awake);
+
+        // Sleep 25ms (exceeding sleep timeout)
+        std::thread::sleep(Duration::from_millis(25));
+        host.step();
+
+        // Screen must STILL be Awake and powered on!
+        assert_eq!(host.screen_state(), ScreenState::Awake);
+        assert!(display_powered.get(), "screen must not turn off when screen_off_timeout is None");
+    }
+
+    #[test]
+    fn host_background_poll_and_wake_while_screen_off() {
+        let touch_point = Rc::new(Cell::new(None));
+        let display_powered = Rc::new(Cell::new(true));
+        let wake_reason = Rc::new(Cell::new(WakeupReason::None));
+        let board = Box::new(TestBoard {
+            touch_point: Rc::clone(&touch_point),
+            display_powered: Rc::clone(&display_powered),
+            wake_reason: Rc::clone(&wake_reason),
         });
 
         let clicked = Arc::new(AtomicBool::new(false));
@@ -979,18 +1304,66 @@ mod tests {
         host.step();
         assert_eq!(host.screen_state(), ScreenState::Awake);
 
-        // 2. Put host to sleep
-        host.sleep();
-        assert_eq!(host.screen_state(), ScreenState::Sleeping);
+        // 2. Put host to screen off
+        host.screen_off();
+        assert_eq!(host.screen_state(), ScreenState::ScreenOff);
         assert!(!display_powered.get());
 
-        // 3. While sleeping, an async event or background update sets display power
+        // 3. While screen is off, an async event or background update sets display power
         host.program.update(TestMsg::Wake);
         // Step processes background state and notices display is now ON
         host.step();
 
         assert_eq!(host.screen_state(), ScreenState::Awake);
         assert!(display_powered.get());
+    }
+
+    #[test]
+    fn host_stay_awake_on_usb() {
+        struct UsbBoard {
+            display_powered: Rc<Cell<bool>>,
+            usb_connected: Rc<Cell<bool>>,
+        }
+        impl Board for UsbBoard {
+            fn size(&self) -> (u32, u32) { (480, 480) }
+            fn flush(&mut self, _damage: &[Rectangle], _pixels: &[u16]) {}
+            fn set_display_power(&mut self, on: bool) { self.display_powered.set(on); }
+            fn is_display_on(&self) -> bool { self.display_powered.get() }
+            fn is_usb_connected(&self) -> bool { self.usb_connected.get() }
+        }
+
+        let display_powered = Rc::new(Cell::new(true));
+        let usb_connected = Rc::new(Cell::new(true));
+        let board = Box::new(UsbBoard {
+            display_powered: Rc::clone(&display_powered),
+            usb_connected: Rc::clone(&usb_connected),
+        });
+
+        let clicked = Arc::new(AtomicBool::new(false));
+        let app = TestApp {
+            clicked: Arc::clone(&clicked),
+            display_powered: None,
+        };
+        let mut host = Host::new(app, board).unwrap();
+        host.set_screen_off_timeout(Some(Duration::from_millis(10)));
+        host.set_sleep_timeout(Some(Duration::from_millis(10)));
+        host.set_stay_awake_on_usb(true);
+
+        // 1. Inactivity reaches screen off timeout -> ScreenOff
+        std::thread::sleep(Duration::from_millis(15));
+        host.step();
+        assert_eq!(host.screen_state(), ScreenState::ScreenOff);
+        assert!(!display_powered.get());
+
+        // 2. Further inactivity with USB connected: MUST REMAIN ScreenOff, NOT enter Sleeping!
+        std::thread::sleep(Duration::from_millis(15));
+        host.step();
+        assert_eq!(host.screen_state(), ScreenState::ScreenOff, "stay_awake_on_usb must keep state in ScreenOff");
+
+        // 3. Disconnect USB: on next step, inactivity triggers transition to Sleeping
+        usb_connected.set(false);
+        host.step();
+        assert_eq!(host.screen_state(), ScreenState::Sleeping, "disconnecting USB allows transitioning to Sleeping");
     }
 }
 
