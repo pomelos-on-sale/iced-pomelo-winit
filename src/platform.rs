@@ -67,8 +67,6 @@ extern "C" {
     fn hal_touch_wait_event(out_ev: *mut HalTouchEvent, timeout_ms: u32) -> bool;
     fn hal_display_set_power(on: bool);
     fn hal_display_is_active() -> bool;
-    #[allow(dead_code)]
-    fn hal_display_set_screen_off_timeout_ms(timeout_ms: u32);
     fn hal_display_get_screen_off_timeout_ms() -> u32;
     fn hal_power_is_usb_connected() -> bool;
     fn hal_power_get_stay_awake_on_usb() -> bool;
@@ -106,12 +104,6 @@ unsafe fn hal_display_set_power(on: bool) {}
 #[cfg(not(target_os = "espidf"))]
 unsafe fn hal_display_is_active() -> bool {
     true
-}
-
-#[cfg(not(target_os = "espidf"))]
-#[allow(unused_variables, dead_code)]
-unsafe fn hal_display_set_screen_off_timeout_ms(timeout_ms: u32) {
-    SIM_SCREEN_OFF_TIMEOUT_MS.store(timeout_ms, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(not(target_os = "espidf"))]
