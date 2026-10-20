@@ -70,6 +70,7 @@ extern "C" {
     fn hal_display_get_screen_off_timeout_ms() -> u32;
     fn hal_power_is_usb_connected() -> bool;
     fn hal_power_get_stay_awake_on_usb() -> bool;
+    fn hal_power_get_keep_screen_on() -> bool;
     fn vTaskDelay(ticks: u32);
 }
 
@@ -77,6 +78,8 @@ extern "C" {
 static SIM_SCREEN_OFF_TIMEOUT_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 #[cfg(not(target_os = "espidf"))]
 static SIM_STAY_AWAKE_ON_USB: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+#[cfg(not(target_os = "espidf"))]
+static SIM_KEEP_SCREEN_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(not(target_os = "espidf"))]
 #[allow(unused_variables)]
@@ -119,6 +122,11 @@ unsafe fn hal_power_is_usb_connected() -> bool {
 #[cfg(not(target_os = "espidf"))]
 unsafe fn hal_power_get_stay_awake_on_usb() -> bool {
     SIM_STAY_AWAKE_ON_USB.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(not(target_os = "espidf"))]
+unsafe fn hal_power_get_keep_screen_on() -> bool {
+    SIM_KEEP_SCREEN_ON.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(not(target_os = "espidf"))]
@@ -237,6 +245,11 @@ pub trait Board {
     fn stay_awake_on_usb(&self) -> bool {
         true
     }
+
+    /// Whether the system is requested to keep the screen on by an active app (defaults to false).
+    fn is_keep_screen_on(&self) -> bool {
+        false
+    }
 }
 
 /// The real panel: the CO5300 over the C side's `hal_display_*`, and the touch controller behind
@@ -296,6 +309,10 @@ impl Board for Panel {
 
     fn stay_awake_on_usb(&self) -> bool {
         unsafe { hal_power_get_stay_awake_on_usb() }
+    }
+
+    fn is_keep_screen_on(&self) -> bool {
+        unsafe { hal_power_get_keep_screen_on() }
     }
 }
 
@@ -523,14 +540,18 @@ where
         // 2. Check inactivity timeout when Awake -> ScreenOff
         let now = Instant::now();
         if self.screen_state == ScreenState::Awake && !self.touching {
-            let stay_awake = self.stay_awake_on_usb() && self.board.borrow().is_usb_connected();
-            if !stay_awake {
-                if let Some(timeout) = self.screen_off_timeout() {
-                    if now.duration_since(self.last_activity) >= timeout {
-                        self.screen_state = ScreenState::ScreenOff;
-                        self.screen_off_at = Some(now);
-                        self.board.borrow_mut().set_display_power(false);
-                    }
+            let stay_awake = (self.stay_awake_on_usb() && self.board.borrow().is_usb_connected())
+                || self.board.borrow().is_keep_screen_on();
+            if stay_awake {
+                // While kept awake by policy (e.g. alarm ringing, stay awake on USB),
+                // continuously refresh last_activity so that once the keep-awake policy ends,
+                // the full auto-screen-off timeout window begins anew rather than instantly powering off.
+                self.last_activity = now;
+            } else if let Some(timeout) = self.screen_off_timeout() {
+                if now.duration_since(self.last_activity) >= timeout {
+                    self.screen_state = ScreenState::ScreenOff;
+                    self.screen_off_at = Some(now);
+                    self.board.borrow_mut().set_display_power(false);
                 }
             }
         }
@@ -638,7 +659,13 @@ where
         self.flushed.set(false);
         self.frame();
         let painted = self.flushed.get();
-        self.first_frame_rendered = true;
+        if !self.first_frame_rendered {
+            self.first_frame_rendered = true;
+            self.screen_state = ScreenState::Awake;
+            self.screen_off_at = None;
+            self.last_activity = Instant::now();
+            self.board.borrow_mut().set_display_power(true);
+        }
 
         if !painted {
             let timeout = match self.tree.next_redraw() {
@@ -730,9 +757,7 @@ where
             || {},
         );
         let render_ms = t0.elapsed().as_millis();
-        if render_ms >= 16 {
-            println!("[perf] frame render took {}ms (>16ms target)", render_ms);
-        }
+        println!("[perf] render took {}ms", render_ms);
 
         self.dirty = !self.messages.is_empty();
 
@@ -982,6 +1007,7 @@ mod tests {
             ScreenState::Awake,
             "host must remain Awake on boot to render first frame even if display starts blanked"
         );
+        assert!(display_powered.get(), "first frame must power on the display");
     }
 
     #[test]
@@ -1089,6 +1115,55 @@ mod tests {
         std::thread::sleep(Duration::from_millis(15));
         host.step();
         assert_eq!(host.screen_state(), ScreenState::ScreenOff, "disconnecting USB allows transitioning to ScreenOff");
+        assert!(!display_powered.get());
+    }
+
+    #[test]
+    fn host_keep_screen_on_override() {
+        struct AwakeBoard {
+            display_powered: Rc<Cell<bool>>,
+            keep_screen_on: Rc<Cell<bool>>,
+        }
+        impl Board for AwakeBoard {
+            fn size(&self) -> (u32, u32) { (480, 480) }
+            fn flush(&mut self, _damage: &[Rectangle], _pixels: &[u16]) {}
+            fn set_display_power(&mut self, on: bool) { self.display_powered.set(on); }
+            fn is_display_on(&self) -> bool { self.display_powered.get() }
+            fn is_keep_screen_on(&self) -> bool { self.keep_screen_on.get() }
+        }
+
+        let display_powered = Rc::new(Cell::new(true));
+        let keep_screen_on = Rc::new(Cell::new(true));
+        let board = Box::new(AwakeBoard {
+            display_powered: Rc::clone(&display_powered),
+            keep_screen_on: Rc::clone(&keep_screen_on),
+        });
+
+        let clicked = Arc::new(AtomicBool::new(false));
+        let app = TestApp {
+            clicked: Arc::clone(&clicked),
+            display_powered: None,
+        };
+        let mut host = Host::new(app, board).unwrap();
+        host.set_screen_off_timeout(Some(Duration::from_millis(10)));
+        host.set_stay_awake_on_usb(false);
+
+        // 1. Inactivity reaches timeout, but keep_screen_on is true -> MUST stay Awake
+        std::thread::sleep(Duration::from_millis(15));
+        host.step();
+        assert_eq!(host.screen_state(), ScreenState::Awake, "keep_screen_on must keep state in Awake");
+        assert!(display_powered.get());
+
+        // 2. Clear keep_screen_on -> immediately after clearing, screen must STILL be Awake because timeout window reset
+        keep_screen_on.set(false);
+        host.step();
+        assert_eq!(host.screen_state(), ScreenState::Awake, "clearing keep_screen_on resets timeout window, remaining Awake initially");
+        assert!(display_powered.get());
+
+        // 3. Inactivity reaches timeout after clearing keep_screen_on -> transitions to ScreenOff
+        std::thread::sleep(Duration::from_millis(15));
+        host.step();
+        assert_eq!(host.screen_state(), ScreenState::ScreenOff, "clearing keep_screen_on allows ScreenOff after timeout");
         assert!(!display_powered.get());
     }
 }
